@@ -10,7 +10,7 @@
 # Клонирование репозитория
 git clone <repository-url>
 cd conversations
-
+git checkout dev
 # Запуск
 docker compose up -d
 
@@ -55,5 +55,6 @@ docker compose up -d
 - **Очереди**: Redis + RQ
 - **Git-хостинг**: Gitea
 - **Контейнеризация**: Docker
+
 
 
