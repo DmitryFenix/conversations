@@ -2,7 +2,7 @@ services:
   api:
     build:
       context: .              # ← ВСЁ ПРОЕКТНОЕ ДЕРЕВО
-      dockerfile: api/Dockerfile
+      dockerfile: api/Dockerfile.dev  # Используем Dockerfile.dev для локальной разработки
     ports:
       - "8000:8000"
     volumes:
@@ -52,7 +52,7 @@ services:
   worker:
     build:
       context: .              # ← ТОЖЕ ВСЁ ДЕРЕВО
-      dockerfile: api/Dockerfile
+      dockerfile: api/Dockerfile.dev  # Используем Dockerfile.dev для локальной разработки
     command: [ "rq", "worker", "default" ]
     volumes:
       - ./artifacts:/artifacts

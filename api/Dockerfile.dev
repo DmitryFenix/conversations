@@ -1,3 +1,7 @@
+# Dockerfile для локальной разработки
+# Используется в docker-compose.yml для локального запуска
+# Включает VOLUME для удобной работы с данными
+
 # === 1. Frontend сборка ===
 FROM node:18.20.4-alpine AS frontend-build
 WORKDIR /frontend
@@ -38,12 +42,9 @@ COPY api/rq_dashboard.py .
 COPY --from=frontend-build /frontend/dist ./static
 
 RUN mkdir -p /artifacts /mr_packages
-# VOLUME удален - Railway не поддерживает VOLUME в Dockerfile
-# Для локальной разработки используйте Dockerfile.dev
+# VOLUME для локальной разработки (не работает на Railway)
+VOLUME /artifacts /mr_packages
 
-# Используем переменную PORT для Railway и других платформ
-ENV PORT=8000
-EXPOSE $PORT
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
-# Railway автоматически установит переменную PORT, используем её
-CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
