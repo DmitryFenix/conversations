@@ -1,0 +1,111 @@
+services:
+  api:
+    build:
+      context: .              # ← ВСЁ ПРОЕКТНОЕ ДЕРЕВО
+      dockerfile: api/Dockerfile.dev  # Используем Dockerfile.dev для локальной разработки
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./artifacts:/artifacts
+      - ./mr_packages:/mr_packages
+      - ./api/reviews.db:/app/reviews.db
+      # Hot reload: монтируем исходники для автоматической перезагрузки
+      - ./api/main.py:/app/main.py
+      - ./api/eval_worker.py:/app/eval_worker.py
+      - ./api/gitea_client.py:/app/gitea_client.py
+      # Примечание: rq_monitor.py и rq_dashboard.py не монтируем для hot reload
+      # Изменения в этих файлах требуют пересборки образа
+    # Hot reload: используем uvicorn с --reload для автоматической перезагрузки при изменениях
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Gitea integration (Gitea в Docker контейнере)
+      # Внутри Docker сети используем имя сервиса и внутренний порт
+      - GITEA_URL=http://gitea:4000
+      - GITEA_WEB_URL=http://localhost:4001  # Для доступа из браузера
+      - GITEA_ADMIN_TOKEN=${GITEA_ADMIN_TOKEN:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    # Исправляем предупреждение о memory overcommit через init-скрипт
+    # В WSL sysctls не работает, поэтому используем команду с установкой sysctl
+    # Отключаем AOF и удаляем старые файлы для избежания проблем с несовместимыми форматами
+    command: >
+      sh -c "
+      echo 1 > /proc/sys/vm/overcommit_memory 2>/dev/null || true &&
+      rm -f /data/appendonly.aof* /data/dump.rdb 2>/dev/null || true &&
+      redis-server --appendonly no --save '' --maxmemory-policy noeviction
+      "
+    # Используем privileged для доступа к /proc/sys (работает везде)
+    privileged: true
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  worker:
+    build:
+      context: .              # ← ТОЖЕ ВСЁ ДЕРЕВО
+      dockerfile: api/Dockerfile.dev  # Используем Dockerfile.dev для локальной разработки
+    command: [ "rq", "worker", "default" ]
+    volumes:
+      - ./artifacts:/artifacts
+      - ./mr_packages:/mr_packages
+      # Hot reload: монтируем исходники для автоматической перезагрузки
+      - ./api/eval_worker.py:/app/eval_worker.py
+      # Доступ к БД для worker
+      - ./api/reviews.db:/app/reviews.db
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - RQ_REDIS_URL=redis://redis:6379
+      - PYTHONUNBUFFERED=1
+
+  gitea:
+    image: gitea/gitea:1.22.2
+    container_name: gitea
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=sqlite3
+      - GITEA__database__PATH=/data/gitea/gitea.db
+      - GITEA__service__DISABLE_REGISTRATION=true
+      - GITEA__server__DOMAIN=localhost
+      - GITEA__server__HTTP_PORT=4000
+      - GITEA__server__ROOT_URL=http://localhost:4001
+    volumes:
+      - ./gitea_data:/data
+      - ./gitea_config:/etc/gitea
+    ports:
+      - "4001:4000"  # Внешний порт 4001, внутренний 4000
+      - "2222:22"
+    restart: always
+
+  # Тесты как отдельный сервис
+  tests:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+    volumes:
+      # Монтируем тесты для hot reload
+      - ./tests:/app/tests
+    environment:
+      - API_BASE_URL=http://api:8000  # Внутри Docker сети используем имя сервиса
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    # По умолчанию не запускается автоматически
+    # Запуск: docker compose run --rm tests
+    # Или для непрерывного запуска: docker compose run --rm tests pytest-watch
+    profiles:
+      - testing  # Запускается только с профилем testing

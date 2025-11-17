@@ -1,0 +1,4 @@
+# Убеждаемся что Dockerfile правильно обрабатывается
+api/Dockerfile text eol=lf
+api/Dockerfile.dev text eol=lf
+

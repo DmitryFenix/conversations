@@ -1,0 +1,69 @@
+name: API Tests
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:  # Позволяет запускать вручную
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      # Запускаем Redis для тестов
+      redis:
+        image: redis:7.2-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r api/requirements.txt
+        pip install -r tests/requirements.txt
+    
+    - name: Start API server
+      run: |
+        # Запускаем API в фоне
+        cd api
+        uvicorn main:app --host 0.0.0.0 --port 8000 &
+        sleep 5  # Ждём запуска API
+      env:
+        GITEA_URL: http://localhost:4000
+        GITEA_WEB_URL: http://localhost:4001
+        GITEA_ADMIN_TOKEN: ""
+    
+    - name: Wait for API
+      run: |
+        timeout 30 bash -c 'until curl -f http://localhost:8000/api/reviewer/sessions; do sleep 1; done'
+    
+    - name: Run tests
+      run: |
+        pytest tests/test_api.py -v --tb=short --color=yes
+      env:
+        API_BASE_URL: http://localhost:8000
+    
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: |
+          tests/.pytest_cache/
+          *.xml
+        if-no-files-found: ignore
+
