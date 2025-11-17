@@ -1,0 +1,48 @@
+# === 1. Frontend сборка ===
+FROM node:18.20.4-alpine AS frontend-build
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm install
+COPY frontend/ ./
+RUN npm run build
+
+# === 2. Python с WeasyPrint ===
+FROM python:3.11.10-slim
+
+# УСТАНАВЛИВАЕМ СИСТЕМНЫЕ ЗАВИСИМОСТИ
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libpango-1.0-0 \
+        libpangocairo-1.0-0 \
+        libcairo2 \
+        libgdk-pixbuf-2.0-0 \
+        libffi8 \
+        shared-mime-info \
+        fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# КРИТИЧНО: ФОРСИРУЕМ weasyprint==62.3 + binary
+COPY api/requirements.txt .
+RUN pip install --no-cache-dir --force-reinstall -r requirements.txt
+
+# Копируем код
+COPY api/main.py .
+COPY api/eval_worker.py .
+COPY api/gitea_client.py .
+COPY api/rq_monitor.py .
+COPY api/rq_dashboard.py .
+
+# Копируем фронтенд
+COPY --from=frontend-build /frontend/dist ./static
+
+RUN mkdir -p /artifacts /mr_packages
+VOLUME /artifacts /mr_packages
+
+# Используем переменную PORT для Railway и других платформ
+ENV PORT=8000
+EXPOSE $PORT
+
+# Railway автоматически установит переменную PORT, используем её
+CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"

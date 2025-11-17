@@ -1,0 +1,35 @@
+# Альтернативная конфигурация для RQ Dashboard
+# Используется, если основная не работает
+# Запуск: docker compose -f docker-compose.monitoring-fallback.yml up -d
+
+services:
+  rq-dashboard:
+    image: python:3.11.10-slim
+    container_name: rq-dashboard
+    # Используем простой скрипт запуска
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "
+      set -e &&
+      echo '=== Installing RQ Dashboard ===' &&
+      pip uninstall -y Flask Flask-CLI 2>/dev/null || true &&
+      pip install --no-cache-dir --force-reinstall 'Flask==2.3.3' 'Werkzeug==2.3.7' &&
+      pip install --no-cache-dir 'rq==1.15.1' 'rq-dashboard==0.6.1' &&
+      echo '=== Installation complete ===' &&
+      echo '=== Starting RQ Dashboard ===' &&
+      exec rq-dashboard --redis-url redis://redis:6379 --host 0.0.0.0 --port 9181 --verbose
+      "
+    ports:
+      - "9181:9181"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RQ_DASHBOARD_REDIS_URL=redis://redis:6379
+    networks:
+      - main_network
+    restart: unless-stopped
+
+networks:
+  main_network:
+    name: conversations_default
+    external: true
+

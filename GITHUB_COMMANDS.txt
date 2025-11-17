@@ -1,0 +1,20 @@
+# Команды для выполнения в PowerShell или Git Bash
+
+# 1. Инициализация git (если еще не инициализирован)
+git init
+
+# 2. Добавление всех файлов
+git add .
+
+# 3. Создание коммита
+git commit -m "Initial commit: Code Review Platform with Gitea integration"
+
+# 4. Подключение remote (ЗАМЕНИТЕ на ваш URL репозитория!)
+git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
+
+# 5. Переименование ветки в main
+git branch -M main
+
+# 6. Пуш в GitHub
+git push -u origin main
+

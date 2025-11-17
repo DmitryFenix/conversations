@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: code-review-platform
+    env: docker
+    dockerfilePath: ./api/Dockerfile
+    dockerContext: .
+    envVars:
+      - key: GITEA_URL
+        value: http://gitea:4000
+      - key: GITEA_WEB_URL
+        sync: false
+      - key: GITEA_ADMIN_TOKEN
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: redis
+          property: connectionString
+    healthCheckPath: /api/reviewer/sessions
+
+  - type: redis
+    name: redis
+    plan: free
+

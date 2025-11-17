@@ -1,0 +1,44 @@
+# Отдельный docker-compose для мониторинга RQ
+# Запуск: docker compose -f docker-compose.monitoring.yml up -d
+# 
+# ВАЖНО: Этот файл использует внешнюю сеть Docker для подключения к Redis
+# Убедитесь, что основной docker-compose.yml запущен и Redis доступен
+# 
+# Имя сети определяется автоматически на основе имени проекта основного docker-compose.yml
+# По умолчанию: conversations_default (если проект называется "conversations")
+# Если имя проекта другое, измените имя сети ниже или используйте:
+# docker compose -p conversations -f docker-compose.monitoring.yml up -d
+#
+# TROUBLESHOOTING: Если Dashboard не запускается, см. TROUBLESHOOTING_DASHBOARD.md
+
+services:
+  rq-dashboard:
+    image: python:3.11.10-slim
+    container_name: rq-dashboard
+    command: >
+      sh -c "
+      echo 'Installing dependencies...' &&
+      pip uninstall -y Flask Flask-CLI 2>/dev/null || true &&
+      pip install --no-cache-dir --force-reinstall 'Flask==2.3.3' 'Werkzeug==2.3.7' &&
+      pip install --no-cache-dir 'rq==1.15.1' 'rq-dashboard==0.6.1' &&
+      echo 'Starting rq-dashboard...' &&
+      exec rq-dashboard --redis-url redis://redis:6379 --host 0.0.0.0 --port 9181
+      "
+    ports:
+      - "9181:9181"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RQ_DASHBOARD_REDIS_URL=redis://redis:6379
+    networks:
+      - main_network
+    restart: unless-stopped
+
+networks:
+  main_network:
+    # Имя сети должно совпадать с именем сети основного docker-compose.yml
+    # По умолчанию Docker Compose создаёт сеть: <имя_проекта>_default
+    # Если ваш проект называется "conversations", сеть будет "conversations_default"
+    # Если другое имя - измените ниже или используйте COMPOSE_PROJECT_NAME
+    name: conversations_default
+    external: true
+
