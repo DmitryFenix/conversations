@@ -38,11 +38,13 @@ COPY api/rq_dashboard.py .
 COPY --from=frontend-build /frontend/dist ./static
 
 RUN mkdir -p /artifacts /mr_packages
-VOLUME /artifacts /mr_packages
+# VOLUME удален - Railway не поддерживает VOLUME в Dockerfile
+# Для локальной разработки используйте Dockerfile.dev
 
 # Используем переменную PORT для Railway и других платформ
 ENV PORT=8000
-EXPOSE $PORT
+EXPOSE 8000
 
-# Railway автоматически установит переменную PORT, используем её
+# Railway автоматически установит переменную PORT через переменную окружения
+# Используем shell для правильной подстановки переменной
 CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
