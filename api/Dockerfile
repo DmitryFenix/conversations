@@ -43,7 +43,8 @@ RUN mkdir -p /artifacts /mr_packages
 
 # Используем переменную PORT для Railway и других платформ
 ENV PORT=8000
-EXPOSE $PORT
+EXPOSE 8000
 
-# Railway автоматически установит переменную PORT, используем её
+# Railway автоматически установит переменную PORT через переменную окружения
+# Используем shell для правильной подстановки переменной
 CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"

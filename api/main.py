@@ -211,6 +211,13 @@ queue = LazyQueue()
 # === FastAPI ===
 app = FastAPI()
 
+# === Healthcheck endpoint (для Railway и других платформ) ===
+@app.get("/health")
+@app.get("/api/health")
+def healthcheck():
+    """Простой healthcheck endpoint, не требует БД или Redis"""
+    return {"status": "ok", "service": "code-review-platform"}
+
 # === RQ Monitoring (должен быть ПЕРЕД статикой и catch-all) ===
 _rq_router_enabled = False
 try:
