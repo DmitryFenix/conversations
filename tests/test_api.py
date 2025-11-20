@@ -328,7 +328,11 @@ class TestSessionManagement:
         # Проверяем, что сессия не видна в списке
         list_response = await api_client.get("/api/reviewer/sessions")
         assert list_response.status_code == 200
-        sessions = list_response.json()
+        data = list_response.json()
+        assert isinstance(data, dict), "Response should be a dict"
+        assert "sessions" in data, "Response should have 'sessions' key"
+        sessions = data["sessions"]
+        assert isinstance(sessions, list), "Sessions should be a list"
         session_ids = [s["id"] for s in sessions]
         assert session_id not in session_ids, "Deleted session should not appear in list"
         print(f"✓ Deleted session removed from list")
