@@ -6,6 +6,12 @@
 version: '3.8'
 
 services:
+  api:
+    environment:
+      - DB_PATH=/tmp/reviews.db
+    volumes:
+      - /tmp:/tmp  # Для создания БД в /tmp
+
   tests:
     build:
       context: .

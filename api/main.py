@@ -28,7 +28,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # === БД ===
-DB_PATH = "/app/reviews.db"
+DB_PATH = os.getenv("DB_PATH", "/app/reviews.db")
+# Создаём директорию для БД если её нет
+db_dir = os.path.dirname(DB_PATH)
+if db_dir and not os.path.exists(db_dir):
+    os.makedirs(db_dir, exist_ok=True)
 SESSION_RETENTION_DAYS = int(os.getenv("SESSION_RETENTION_DAYS", "2"))
 SESSION_CLEANUP_INTERVAL_SECONDS = int(os.getenv("SESSION_CLEANUP_INTERVAL_SECONDS", "3600"))
 SESSION_RETENTION_DELTA = timedelta(days=SESSION_RETENTION_DAYS)
@@ -59,7 +63,38 @@ else:
 
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    # Убеждаемся, что директория для БД существует
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+            logger.info(f"Created DB directory: {db_dir}")
+        except Exception as e:
+            logger.warning(f"Could not create DB directory {db_dir}: {e}")
+            # Пробуем использовать /tmp как fallback
+            fallback_dir = "/tmp"
+            if not os.path.exists(fallback_dir):
+                os.makedirs(fallback_dir, exist_ok=True)
+            global DB_PATH
+            DB_PATH = os.path.join(fallback_dir, "reviews.db")
+            logger.info(f"Using fallback DB path: {DB_PATH}")
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        logger.info(f"Connected to database at {DB_PATH}")
+    except sqlite3.OperationalError as e:
+        logger.error(f"Failed to connect to database at {DB_PATH}: {e}")
+        # Пробуем создать БД в /tmp как fallback
+        fallback_path = "/tmp/reviews.db"
+        logger.warning(f"Trying fallback path: {fallback_path}")
+        try:
+            conn = sqlite3.connect(fallback_path)
+            global DB_PATH
+            DB_PATH = fallback_path
+            logger.info(f"Using fallback DB path: {DB_PATH}")
+        except Exception as fallback_error:
+            logger.error(f"Fallback also failed: {fallback_error}")
+            raise
     c = conn.cursor()
 
     # Создаём таблицу с новыми полями
