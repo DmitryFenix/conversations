@@ -56,6 +56,8 @@ docker compose up -d
 - ✅ Синхронизация комментариев с Gitea
 - ✅ Трекинг времени сессий
 - ✅ Мониторинг производительности
+- ✅ CI/CD с автоматическим тестированием и деплоем
+- ✅ Автоматическая очистка старых сессий (через 2 дня)
 
 ---
 
@@ -65,6 +67,7 @@ docker compose up -d
 - [Краткое описание](./PROJECT_DESCRIPTION_SHORT.md)
 - [Детальная презентация](./PROJECT_DESCRIPTION_DETAILED.md)
 - [Руководство по развертыванию](./DEPLOYMENT_GUIDE.md)
+- [CI/CD и автоматизация](./CI_CD_GUIDE.md)
 - [Рабочий процесс кандидата](./CANDIDATE_WORKFLOW.md)
 - [Мониторинг RQ](./RQ_PERFORMANCE_MONITORING.md)
 

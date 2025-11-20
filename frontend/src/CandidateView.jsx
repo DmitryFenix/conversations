@@ -94,10 +94,6 @@ export default function CandidateView() {
 
   // Отметить готовность
   const markReady = async () => {
-    if (!confirm('Вы уверены, что завершили code review? После этого вы не сможете добавлять комментарии.')) {
-      return
-    }
-
     setIsMarkingReady(true)
     try {
       const res = await axios.post(`${API_URL}/candidate/sessions/${token}/ready`)
@@ -212,8 +208,7 @@ export default function CandidateView() {
           clearTimeout(exitTimeoutRef.current)
         }
         exitTimeoutRef.current = setTimeout(() => {
-          setStatus('Сессия истекла')
-          alert('Сессия истекла. Пожалуйста, обратитесь к проверяющему.')
+          setStatus('Сессия истекла. Пожалуйста, обратитесь к проверяющему.')
         }, 1000)
       } else {
         if (exitTimeoutRef.current) {

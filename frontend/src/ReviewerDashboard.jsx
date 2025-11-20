@@ -155,12 +155,10 @@ export default function ReviewerDashboard() {
     setIsLoadingPR(true)
     try {
       const res = await axios.post(`${API_URL}/reviewer/sessions/${sessionId}/gitea/create-pr`)
-      alert(`PR создан! Номер: #${res.data.pr_id}\nURL: ${res.data.pr_url}`)
       await loadSession(sessionId)
       await loadGiteaPR(sessionId)
     } catch (err) {
       console.error('Ошибка создания PR:', err)
-      alert(`Ошибка создания PR: ${err.response?.data?.detail || err.message}`)
     } finally {
       setIsLoadingPR(false)
     }
@@ -170,7 +168,6 @@ export default function ReviewerDashboard() {
     setIsLoadingPR(true)
     try {
       const res = await axios.post(`${API_URL}/reviewer/sessions/${sessionId}/gitea/sync-comments`)
-      alert(`Синхронизировано комментариев: ${res.data.synced_count} из ${res.data.total_count}`)
       if (res.data.errors && res.data.errors.length > 0) {
         console.warn('Ошибки синхронизации:', res.data.errors)
       }
@@ -180,7 +177,6 @@ export default function ReviewerDashboard() {
       }
     } catch (err) {
       console.error('Ошибка синхронизации:', err)
-      alert(`Ошибка синхронизации: ${err.response?.data?.detail || err.message}`)
     } finally {
       setIsLoadingPR(false)
     }
@@ -190,14 +186,12 @@ export default function ReviewerDashboard() {
     setIsLoadingPR(true)
     try {
       const res = await axios.post(`${API_URL}/reviewer/sessions/${sessionId}/gitea/sync-comments-from-gitea`)
-      alert(`Синхронизировано комментариев из Gitea: ${res.data.synced_count}\nВсего комментариев: ${res.data.total_count}`)
       await loadGiteaPR(sessionId)
       if (selectedSession && selectedSession.id === sessionId) {
         loadSession(sessionId)
       }
     } catch (err) {
       console.error('Ошибка синхронизации из Gitea:', err)
-      alert(`Ошибка синхронизации: ${err.response?.data?.detail || err.message}`)
     } finally {
       setIsLoadingPR(false)
     }
@@ -205,7 +199,6 @@ export default function ReviewerDashboard() {
 
   const createSession = async () => {
     if (!newSession.candidate_name.trim()) {
-      alert('Введите имя кандидата')
       return
     }
 
@@ -228,7 +221,6 @@ export default function ReviewerDashboard() {
       loadSessions()
     } catch (err) {
       console.error('Ошибка создания сессии:', err)
-      alert('Ошибка создания сессии')
     } finally {
       setIsLoading(false)
     }
@@ -248,7 +240,7 @@ export default function ReviewerDashboard() {
         }, 2000)
       } catch (err) {
         console.error('Ошибка копирования:', err)
-        alert('Не удалось скопировать ссылку')
+        console.error('Не удалось скопировать ссылку')
       }
     }
   }
@@ -275,10 +267,8 @@ export default function ReviewerDashboard() {
         }))
       }
       loadSessions()
-      alert('Сессия продлена на 30 минут')
     } catch (err) {
       console.error('Ошибка продления:', err)
-      alert('Ошибка продления сессии')
     }
   }
 
@@ -286,25 +276,18 @@ export default function ReviewerDashboard() {
     setIsLoading(true)
     try {
       const res = await axios.post(`${API_URL}/reviewer/sessions/${id}/evaluate`)
-      alert(`Оценка запущена. Job ID: ${res.data.job_id}`)
       // Можно добавить polling для проверки статуса
     } catch (err) {
       console.error('Ошибка оценки:', err)
-      alert('Ошибка запуска оценки')
     } finally {
       setIsLoading(false)
     }
   }
 
   const deleteSession = async (id, candidateName) => {
-    if (!confirm(`Вы уверены, что хотите удалить сессию #${id} (${candidateName})?\n\nСессия будет помечена как удалённая и скрыта из списка.`)) {
-      return
-    }
-
     setIsLoading(true)
     try {
       await axios.delete(`${API_URL}/reviewer/sessions/${id}`)
-      alert('Сессия удалена')
       loadSessions()
       // Если удаляемая сессия была открыта, возвращаемся к списку
       if (selectedSession && selectedSession.id === id) {
@@ -313,28 +296,21 @@ export default function ReviewerDashboard() {
       }
     } catch (err) {
       console.error('Ошибка удаления:', err)
-      alert(`Ошибка удаления: ${err.response?.data?.detail || err.message}`)
     } finally {
       setIsLoading(false)
     }
   }
 
   const finishSession = async (id) => {
-    if (!confirm('Вы уверены, что хотите завершить сессию досрочно? Сессия будет закрыта немедленно.')) {
-      return
-    }
-
     setIsLoading(true)
     try {
       await axios.post(`${API_URL}/reviewer/sessions/${id}/finish`)
-      alert('Сессия завершена')
       loadSessions()
       if (selectedSession && selectedSession.id === id) {
         loadSession(id)
       }
     } catch (err) {
       console.error('Ошибка завершения:', err)
-      alert(`Ошибка завершения: ${err.response?.data?.detail || err.message}`)
     } finally {
       setIsLoading(false)
     }
@@ -555,7 +531,7 @@ export default function ReviewerDashboard() {
                   className="btn-icon"
                   onClick={() => {
                     navigator.clipboard.writeText(`${window.location.origin}/candidate/${selectedSession.access_token}`)
-                    alert('Ссылка скопирована!')
+                    // Ссылка скопирована
                   }}
                 >
                   <Copy size={14} />

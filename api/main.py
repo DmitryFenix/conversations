@@ -14,8 +14,10 @@ from rq import Queue
 from redis import Redis
 import time
 import secrets
+import threading
+import glob
 from eval_worker import evaluate
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # === PDF ===
 from weasyprint import HTML
@@ -27,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 # === БД ===
 DB_PATH = "/app/reviews.db"
+SESSION_RETENTION_DAYS = int(os.getenv("SESSION_RETENTION_DAYS", "2"))
+SESSION_CLEANUP_INTERVAL_SECONDS = int(os.getenv("SESSION_CLEANUP_INTERVAL_SECONDS", "3600"))
+SESSION_RETENTION_DELTA = timedelta(days=SESSION_RETENTION_DAYS)
 
 # === GITEA ===
 from gitea_client import GiteaClient
@@ -146,7 +151,85 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+def parse_iso_datetime(value: str):
+    if not value:
+        return None
+    try:
+        if value.endswith('Z'):
+            value = value[:-1] + '+00:00'
+        return datetime.fromisoformat(value)
+    except ValueError:
+        logger.warning(f"Failed to parse datetime value: {value}")
+        return None
+
+
+def cleanup_session_artifacts(session_ids):
+    for session_id in session_ids:
+        pattern = f"/artifacts/{session_id}_*"
+        for path in glob.glob(pattern):
+            try:
+                os.remove(path)
+                logger.info(f"Removed artifact file {path} for session {session_id}")
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                logger.warning(f"Failed to remove artifact {path}: {e}")
+
+
+def cleanup_old_sessions_once():
+    cutoff = datetime.utcnow() - SESSION_RETENTION_DELTA
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, created_at FROM sessions WHERE deleted_at IS NULL")
+    rows = c.fetchall()
+    conn.close()
+
+    expired_ids = []
+    for session_id, created_at in rows:
+        created_dt = parse_iso_datetime(created_at)
+        if created_dt is None:
+            expired_ids.append(session_id)
+            continue
+        
+        # Приводим к naive datetime для сравнения (убираем timezone если есть)
+        if created_dt.tzinfo is not None:
+            # Конвертируем aware datetime в UTC, затем убираем timezone info
+            created_dt = created_dt.astimezone(timezone.utc).replace(tzinfo=None)
+        
+        if created_dt < cutoff:
+            expired_ids.append(session_id)
+
+    if not expired_ids:
+        return 0
+
+    deleted_at = datetime.utcnow().isoformat() + 'Z'
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.executemany("UPDATE sessions SET deleted_at = ? WHERE id = ?", [(deleted_at, session_id) for session_id in expired_ids])
+    conn.commit()
+    conn.close()
+
+    cleanup_session_artifacts(expired_ids)
+    logger.info(f"Auto-cleaned {len(expired_ids)} sessions older than {SESSION_RETENTION_DAYS} days")
+    return len(expired_ids)
+
+
+def start_session_cleanup_task():
+    def _worker():
+        while True:
+            try:
+                cleanup_old_sessions_once()
+            except Exception as e:
+                logger.error(f"Session cleanup failed: {e}", exc_info=True)
+            time.sleep(max(SESSION_CLEANUP_INTERVAL_SECONDS, 60))
+
+    threading.Thread(target=_worker, daemon=True, name="session-cleanup").start()
+
+
 init_db()
+start_session_cleanup_task()
 
 # === Redis + RQ ===
 # Ленивое подключение к Redis (при первом использовании)
@@ -217,6 +300,65 @@ app = FastAPI()
 def healthcheck():
     """Простой healthcheck endpoint, не требует БД или Redis"""
     return {"status": "ok", "service": "code-review-platform"}
+
+# === API: Ручная очистка старых сессий ===
+@app.post("/api/admin/cleanup-sessions")
+def manual_cleanup_sessions():
+    """
+    Ручной запуск очистки старых сессий (старше SESSION_RETENTION_DAYS дней)
+    Полезно для немедленной очистки или тестирования
+    """
+    try:
+        deleted_count = cleanup_old_sessions_once()
+        return {
+            "status": "success",
+            "deleted_sessions": deleted_count,
+            "retention_days": SESSION_RETENTION_DAYS,
+            "message": f"Cleaned up {deleted_count} sessions older than {SESSION_RETENTION_DAYS} days"
+        }
+    except Exception as e:
+        logger.error(f"Manual cleanup failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
+
+# === API: Статистика сессий ===
+@app.get("/api/admin/sessions-stats")
+def get_sessions_stats():
+    """
+    Получить статистику по сессиям (активные, удалённые, истекающие)
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # Активные сессии
+    c.execute("SELECT COUNT(*) FROM sessions WHERE deleted_at IS NULL")
+    active_count = c.fetchone()[0]
+    
+    # Удалённые сессии
+    c.execute("SELECT COUNT(*) FROM sessions WHERE deleted_at IS NOT NULL")
+    deleted_count = c.fetchone()[0]
+    
+    # Сессии, которые скоро истекут (менее 1 часа)
+    cutoff = datetime.utcnow() + timedelta(hours=1)
+    cutoff_str = cutoff.isoformat() + 'Z'
+    c.execute("SELECT COUNT(*) FROM sessions WHERE deleted_at IS NULL AND expires_at < ?", (cutoff_str,))
+    expiring_soon_count = c.fetchone()[0]
+    
+    # Сессии старше retention периода, но ещё не удалённые
+    retention_cutoff = datetime.utcnow() - SESSION_RETENTION_DELTA
+    retention_cutoff_str = retention_cutoff.isoformat() + 'Z'
+    c.execute("SELECT COUNT(*) FROM sessions WHERE deleted_at IS NULL AND created_at < ?", (retention_cutoff_str,))
+    old_uncleaned_count = c.fetchone()[0]
+    
+    conn.close()
+    
+    return {
+        "active_sessions": active_count,
+        "deleted_sessions": deleted_count,
+        "expiring_soon": expiring_soon_count,
+        "old_uncleaned": old_uncleaned_count,
+        "retention_days": SESSION_RETENTION_DAYS,
+        "cleanup_interval_seconds": SESSION_CLEANUP_INTERVAL_SECONDS
+    }
 
 # === RQ Monitoring (должен быть ПЕРЕД статикой и catch-all) ===
 _rq_router_enabled = False

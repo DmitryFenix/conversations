@@ -168,7 +168,7 @@ export default function TimerWidget() {
           clearTimeout(exitTimeoutRef.current)
         }
         exitTimeoutRef.current = setTimeout(() => {
-          alert('Сессия истекла. Пожалуйста, обратитесь к проверяющему.')
+          // Сессия истекла
         }, 1000)
       } else {
         if (exitTimeoutRef.current) {
