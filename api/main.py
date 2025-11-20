@@ -63,6 +63,8 @@ else:
 
 
 def init_db():
+    global DB_PATH
+    
     # Убеждаемся, что директория для БД существует
     db_dir = os.path.dirname(DB_PATH)
     if db_dir and not os.path.exists(db_dir):
@@ -75,7 +77,6 @@ def init_db():
             fallback_dir = "/tmp"
             if not os.path.exists(fallback_dir):
                 os.makedirs(fallback_dir, exist_ok=True)
-            global DB_PATH
             DB_PATH = os.path.join(fallback_dir, "reviews.db")
             logger.info(f"Using fallback DB path: {DB_PATH}")
     
@@ -89,7 +90,6 @@ def init_db():
         logger.warning(f"Trying fallback path: {fallback_path}")
         try:
             conn = sqlite3.connect(fallback_path)
-            global DB_PATH
             DB_PATH = fallback_path
             logger.info(f"Using fallback DB path: {DB_PATH}")
         except Exception as fallback_error:
