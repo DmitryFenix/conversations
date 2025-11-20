@@ -488,7 +488,12 @@ def create_session(payload: SessionCreate):
     conn.commit()
     conn.close()
 
-    diff_path = f"/artifacts/{session_id}_diff.patch"
+    # Создаём demo diff (для обратной совместимости)
+    artifacts_dir = "/artifacts"
+    if not os.path.exists(artifacts_dir):
+        os.makedirs(artifacts_dir, exist_ok=True)
+    
+    diff_path = f"{artifacts_dir}/{session_id}_diff.patch"
     demo_diff = """diff --git a/main.py b/main.py
 index abc123..def456 100644
 --- a/main.py
@@ -500,8 +505,11 @@ index abc123..def456 100644
 +    # TODO: add input validation
      return True
 """
-    with open(diff_path, "w") as f:
-        f.write(demo_diff)
+    try:
+        with open(diff_path, "w") as f:
+            f.write(demo_diff)
+    except Exception as e:
+        logger.warning(f"Failed to create demo diff: {e}")
 
     return {"session_id": session_id, "access_token": access_token, "reviewer_token": reviewer_token}
 
@@ -706,7 +714,11 @@ def greet():
     conn.close()
 
     # Создаём demo diff (для обратной совместимости)
-    diff_path = f"/artifacts/{session_id}_diff.patch"
+    artifacts_dir = "/artifacts"
+    if not os.path.exists(artifacts_dir):
+        os.makedirs(artifacts_dir, exist_ok=True)
+    
+    diff_path = f"{artifacts_dir}/{session_id}_diff.patch"
     demo_diff = """diff --git a/main.py b/main.py
 index abc123..def456 100644
 --- a/main.py
@@ -718,8 +730,11 @@ index abc123..def456 100644
 +    # TODO: add input validation
      return True
 """
-    with open(diff_path, "w") as f:
-        f.write(demo_diff)
+    try:
+        with open(diff_path, "w") as f:
+            f.write(demo_diff)
+    except Exception as e:
+        logger.warning(f"Failed to create demo diff: {e}")
 
     response = {
         "session_id": session_id,

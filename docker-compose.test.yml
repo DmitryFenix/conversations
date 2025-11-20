@@ -11,6 +11,7 @@ services:
       - DB_PATH=/tmp/reviews.db
     volumes:
       - /tmp:/tmp  # Для создания БД в /tmp
+      - ./artifacts:/artifacts  # Для создания diff файлов
 
   tests:
     build:
