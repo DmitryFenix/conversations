@@ -87,11 +87,20 @@ jobs:
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
+      - name: Verify Node.js version
+        run: |
+          echo "Node version: $(node --version)"
+          echo "npm version: $(npm --version)"
+          node --version | grep -E "v(20|22)" || (echo "ERROR: Node version must be 20 or 22" && exit 1)
+
       - name: Install dependencies
         working-directory: frontend
         run: |
-          # Если npm ci не работает, обновляем lock файл
-          npm ci || (npm install --package-lock-only && npm ci)
+          # Если npm ci не работает из-за несинхронизированного lock файла, используем npm install
+          if ! npm ci; then
+            echo "package-lock.json не синхронизирован, обновляем..."
+            npm install
+          fi
 
       - name: Run ESLint
         working-directory: frontend
@@ -180,11 +189,20 @@ jobs:
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
+      - name: Verify Node.js version
+        run: |
+          echo "Node version: $(node --version)"
+          echo "npm version: $(npm --version)"
+          node --version | grep -E "v(20|22)" || (echo "ERROR: Node version must be 20 or 22" && exit 1)
+
       - name: Install dependencies
         working-directory: frontend
         run: |
-          # Если npm ci не работает, обновляем lock файл
-          npm ci || (npm install --package-lock-only && npm ci)
+          # Если npm ci не работает из-за несинхронизированного lock файла, используем npm install
+          if ! npm ci; then
+            echo "package-lock.json не синхронизирован, обновляем..."
+            npm install
+          fi
 
       - name: Build frontend
         working-directory: frontend
