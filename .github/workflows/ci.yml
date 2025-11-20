@@ -352,16 +352,20 @@ jobs:
       - name: Validate docker-compose.dev.yml
         run: docker compose -f docker-compose.dev.yml config > /dev/null
 
-      - name: Validate docker-compose.test.yml
-        run: docker compose -f docker-compose.test.yml config > /dev/null
+      - name: Validate docker-compose.test.yml (with base file)
+        run: |
+          # docker-compose.test.yml - это override файл, нужно валидировать вместе с основным
+          docker compose -f docker-compose.yml -f docker-compose.test.yml config > /dev/null
 
       - name: Check for common issues
         run: |
           echo "Checking for common docker-compose issues..."
-          for file in docker-compose.yml docker-compose.dev.yml docker-compose.test.yml; do
-            echo "Checking $file..."
-            docker compose -f $file config --quiet || exit 1
-          done
+          echo "Checking docker-compose.yml..."
+          docker compose -f docker-compose.yml config --quiet || exit 1
+          echo "Checking docker-compose.dev.yml..."
+          docker compose -f docker-compose.dev.yml config --quiet || exit 1
+          echo "Checking docker-compose.yml + docker-compose.test.yml..."
+          docker compose -f docker-compose.yml -f docker-compose.test.yml config --quiet || exit 1
           echo "All files are valid!"
 
   code-quality:
