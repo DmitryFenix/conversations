@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { Plus, Moon, Sun, FileText, MessageSquare, Timer, LogOut, ArrowLeft, Copy, ExternalLink, GitBranch, RefreshCw, GitMerge, Trash2, CheckCircle, X, Clock } from 'lucide-react'
 import axios from 'axios'
+import MRSelector from './MRSelector'
 
 const API_URL = '/api'
 
@@ -19,11 +20,15 @@ export default function ReviewerDashboard() {
   const [newSession, setNewSession] = useState({
     candidate_name: '',
     mr_package: 'demo_package',
-    reviewer_name: 'Reviewer'
+    reviewer_name: 'Reviewer',
+    mr_ids: []
   })
   const [createdSessionInfo, setCreatedSessionInfo] = useState(null) // Информация о созданной сессии для модального окна
   const [linkCopied, setLinkCopied] = useState(false) // Флаг, что ссылка скопирована
+  const [creationProgress, setCreationProgress] = useState(0) // Прогресс создания сессии (0-100)
+  const [creationProgressMessage, setCreationProgressMessage] = useState('') // Сообщение о прогрессе
   const tickIntervalRef = useRef(null) // Для таймера
+  const progressIntervalRef = useRef(null) // Для прогресс-бара создания сессии
 
   // Загрузка списка сессий
   useEffect(() => {
@@ -32,6 +37,20 @@ export default function ReviewerDashboard() {
       loadSession(parseInt(sessionId))
     }
   }, [sessionId])
+
+  // Очистка интервалов при размонтировании
+  useEffect(() => {
+    return () => {
+      if (tickIntervalRef.current) {
+        clearInterval(tickIntervalRef.current)
+        tickIntervalRef.current = null
+      }
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current)
+        progressIntervalRef.current = null
+      }
+    }
+  }, [])
 
   // Таймер сессии с прогресс-баром (для детального вида)
   useEffect(() => {
@@ -203,25 +222,87 @@ export default function ReviewerDashboard() {
     }
 
     setIsLoading(true)
+    setCreationProgress(0)
+    
+    let sessionId = null
+    let progressPollingInterval = null
+
     try {
-      const res = await axios.post(`${API_URL}/reviewer/sessions`, newSession)
+      // Запускаем запрос на создание сессии
+      const createPromise = axios.post(`${API_URL}/reviewer/sessions`, newSession)
+      
+      // Начинаем polling прогресса после получения sessionId
+      
+      // Ждем ответ от создания сессии
+      const res = await createPromise
       const createdSession = res.data
+      sessionId = createdSession.session_id
       
-      // Сохраняем информацию о созданной сессии для показа в модальном окне
-      const tokenUrl = `${window.location.origin}/candidate/${createdSession.access_token}`
-      setLinkCopied(false) // Сбрасываем флаг копирования
-      setCreatedSessionInfo({
-        sessionId: createdSession.session_id,
-        accessToken: createdSession.access_token,
-        tokenUrl: tokenUrl
-      })
+      // Начинаем polling прогресса
+      setCreationProgress(15) // Начальный прогресс после создания сессии
+      setCreationProgressMessage('Сессия создана в базе данных')
       
-      setNewSession({ candidate_name: '', mr_package: 'demo_package', reviewer_name: 'Reviewer' })
-      setShowCreateForm(false)
-      loadSessions()
+      const finalPolling = setInterval(async () => {
+        try {
+          const progressRes = await axios.get(`${API_URL}/reviewer/sessions/${sessionId}/creation-progress`)
+          const progressData = progressRes.data
+          setCreationProgress(progressData.progress)
+          setCreationProgressMessage(progressData.message || 'Создание сессии...')
+          
+          if (progressData.progress >= 100) {
+            clearInterval(finalPolling)
+            
+            // Небольшая задержка перед показом модального окна
+            setTimeout(() => {
+              // Сохраняем информацию о созданной сессии для показа в модальном окне
+              const tokenUrl = `${window.location.origin}/candidate/${createdSession.access_token}`
+              setLinkCopied(false) // Сбрасываем флаг копирования
+              setCreatedSessionInfo({
+                sessionId: createdSession.session_id,
+                accessToken: createdSession.access_token,
+                tokenUrl: tokenUrl
+              })
+              
+              setNewSession({ candidate_name: '', mr_package: 'demo_package', reviewer_name: 'Reviewer' })
+              setShowCreateForm(false)
+              loadSessions()
+              setIsLoading(false)
+              setCreationProgress(0)
+              setCreationProgressMessage('')
+              
+              // Перенаправляем на страницу выбора MR
+              navigate(`/reviewer/sessions/${sessionId}/select-mr`)
+            }, 500)
+          }
+        } catch (err) {
+          // Если не удалось получить прогресс, считаем что готово
+          clearInterval(finalPolling)
+          setCreationProgress(100)
+          setCreationProgressMessage('Готово!')
+          
+          setTimeout(() => {
+            const tokenUrl = `${window.location.origin}/candidate/${createdSession.access_token}`
+            setLinkCopied(false)
+            setCreatedSessionInfo({
+              sessionId: createdSession.session_id,
+              accessToken: createdSession.access_token,
+              tokenUrl: tokenUrl
+            })
+            
+            setNewSession({ candidate_name: '', mr_package: 'demo_package', reviewer_name: 'Reviewer' })
+            setShowCreateForm(false)
+            loadSessions()
+            setIsLoading(false)
+            setCreationProgress(0)
+            setCreationProgressMessage('')
+          }, 500)
+        }
+      }, 300) // Polling каждые 300ms
+      
     } catch (err) {
       console.error('Ошибка создания сессии:', err)
-    } finally {
+      setCreationProgress(0)
+      setCreationProgressMessage('')
       setIsLoading(false)
     }
   }
@@ -445,22 +526,14 @@ export default function ReviewerDashboard() {
               Завершить сессию
             </button>
             <a
-              href={`${API_URL}/reviewer/sessions/${selectedSession.id}/report`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn btn-secondary"
-            >
-              <FileText size={16} />
-              Отчёт
-            </a>
-            <a
               href={`${API_URL}/reviewer/sessions/${selectedSession.id}/report/pdf`}
               target="_blank"
               rel="noopener noreferrer"
-              className="btn"
-              style={{ background: '#27ae60', color: 'white' }}
+              className="btn btn-primary"
+              style={{ background: '#3498db', color: 'white' }}
             >
-              PDF
+              <FileText size={16} />
+              Отчёт (PDF)
             </a>
             <button className="btn btn-primary" onClick={() => evaluateSession(selectedSession.id)} disabled={isLoading}>
               Оценить
@@ -501,206 +574,463 @@ export default function ReviewerDashboard() {
               ⚠️ Эта сессия была удалена {formatDate(selectedSession.deleted_at)}
             </div>
           )}
+          {/* Статистика по комментариям */}
+          {selectedSession.comments && selectedSession.comments.length > 0 && (
+            <div style={{ 
+              display: 'grid', 
+              gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', 
+              gap: '16px', 
+              marginBottom: '20px' 
+            }}>
+              {(() => {
+                const comments = selectedSession.comments || []
+                const bySeverity = comments.reduce((acc, c) => {
+                  const sev = c.severity || 'medium'
+                  acc[sev] = (acc[sev] || 0) + 1
+                  return acc
+                }, {})
+                const byType = comments.reduce((acc, c) => {
+                  const type = c.type || 'comment'
+                  acc[type] = (acc[type] || 0) + 1
+                  return acc
+                }, {})
+                
+                return (
+                  <>
+                    <div style={{
+                      background: 'white',
+                      padding: '20px',
+                      borderRadius: '12px',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+                      border: '1px solid #e9ecef'
+                    }}>
+                      <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                        Всего комментариев
+                      </div>
+                      <div style={{ fontSize: '32px', fontWeight: 'bold', color: '#3498db' }}>
+                        {comments.length}
+                      </div>
+                    </div>
+                    {Object.entries(bySeverity).map(([severity, count]) => {
+                      const colors = {
+                        critical: { bg: '#ffebee', color: '#c62828', label: 'Критичные' },
+                        high: { bg: '#fff3e0', color: '#e65100', label: 'Высокий' },
+                        medium: { bg: '#fffde7', color: '#f57f17', label: 'Средний' },
+                        low: { bg: '#f3f4f7', color: '#546e7a', label: 'Низкий' }
+                      }
+                      const style = colors[severity] || colors.medium
+                      return (
+                        <div key={severity} style={{
+                          background: 'white',
+                          padding: '20px',
+                          borderRadius: '12px',
+                          boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+                          border: '1px solid #e9ecef'
+                        }}>
+                          <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                            {style.label}
+                          </div>
+                          <div style={{ fontSize: '32px', fontWeight: 'bold', color: style.color }}>
+                            {count}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </>
+                )
+              })()}
+            </div>
+          )}
+
           <div className="card">
             <h2>Информация о сессии</h2>
-            <div style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: '10px', marginTop: '15px' }}>
-              <div><strong>Кандидат:</strong></div>
-              <div>{selectedSession.candidate_name}</div>
+            <div style={{ 
+              display: 'grid', 
+              gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', 
+              gap: '20px', 
+              marginTop: '20px' 
+            }}>
+              <div style={{
+                padding: '16px',
+                background: '#f8f9fa',
+                borderRadius: '8px',
+                border: '1px solid #e9ecef'
+              }}>
+                <div style={{ fontSize: '12px', color: '#666', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                  Кандидат
+                </div>
+                <div style={{ fontSize: '18px', fontWeight: '600', color: '#1a1a1a' }}>
+                  {selectedSession.candidate_name}
+                </div>
+              </div>
               
-              <div><strong>Проверяющий:</strong></div>
-              <div>{selectedSession.reviewer_name || '—'}</div>
+              <div style={{
+                padding: '16px',
+                background: '#f8f9fa',
+                borderRadius: '8px',
+                border: '1px solid #e9ecef'
+              }}>
+                <div style={{ fontSize: '12px', color: '#666', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                  Проверяющий
+                </div>
+                <div style={{ fontSize: '18px', fontWeight: '600', color: '#1a1a1a' }}>
+                  {selectedSession.reviewer_name || 'Не указан'}
+                </div>
+              </div>
               
-              <div><strong>Создано:</strong></div>
-              <div>{formatDate(selectedSession.created_at)}</div>
+              <div style={{
+                padding: '16px',
+                background: '#f8f9fa',
+                borderRadius: '8px',
+                border: '1px solid #e9ecef'
+              }}>
+                <div style={{ fontSize: '12px', color: '#666', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                  MR Package
+                </div>
+                <div style={{ fontSize: '18px', fontWeight: '600', color: '#1a1a1a', fontFamily: 'monospace' }}>
+                  {selectedSession.mr_package}
+                </div>
+              </div>
               
-              <div><strong>Истекает:</strong></div>
-              <div>{formatDate(selectedSession.expires_at)}</div>
+              <div style={{
+                padding: '16px',
+                background: '#f8f9fa',
+                borderRadius: '8px',
+                border: '1px solid #e9ecef'
+              }}>
+                <div style={{ fontSize: '12px', color: '#666', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                  Статус
+                </div>
+                <div>
+                  <span style={{
+                    display: 'inline-block',
+                    padding: '6px 12px',
+                    borderRadius: '20px',
+                    fontSize: '13px',
+                    fontWeight: '600',
+                    background: selectedSession.status === 'active' ? '#d4edda' : 
+                               selectedSession.status === 'finished' ? '#cce5ff' : 
+                               selectedSession.status === 'expired' ? '#f8d7da' : '#e2e3e5',
+                    color: selectedSession.status === 'active' ? '#155724' : 
+                          selectedSession.status === 'finished' ? '#004085' : 
+                          selectedSession.status === 'expired' ? '#721c24' : '#383d41'
+                  }}>
+                    {selectedSession.status === 'active' ? 'Активна' : 
+                     selectedSession.status === 'finished' ? 'Завершена' : 
+                     selectedSession.status === 'expired' ? 'Истекла' : 
+                     selectedSession.status || 'active'}
+                  </span>
+                </div>
+              </div>
               
-              <div><strong>Статус:</strong></div>
-              <div>{selectedSession.status || 'active'}</div>
+              <div style={{
+                padding: '16px',
+                background: '#f8f9fa',
+                borderRadius: '8px',
+                border: '1px solid #e9ecef'
+              }}>
+                <div style={{ fontSize: '12px', color: '#666', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                  Создано
+                </div>
+                <div style={{ fontSize: '14px', color: '#1a1a1a' }}>
+                  {formatDate(selectedSession.created_at)}
+                </div>
+              </div>
               
-              <div><strong>MR Package:</strong></div>
-              <div>{selectedSession.mr_package}</div>
-              
-              <div><strong>Токен кандидата:</strong></div>
+              <div style={{
+                padding: '16px',
+                background: '#f8f9fa',
+                borderRadius: '8px',
+                border: '1px solid #e9ecef'
+              }}>
+                <div style={{ fontSize: '12px', color: '#666', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                  Истекает
+                </div>
+                <div style={{ fontSize: '14px', color: '#1a1a1a' }}>
+                  {formatDate(selectedSession.expires_at)}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ marginTop: '20px', padding: '16px', background: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef' }}>
+              <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                Токен кандидата
+              </div>
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <code style={{ fontSize: '12px', background: '#f0f0f0', padding: '4px 8px', borderRadius: '4px' }}>
+                <code style={{ 
+                  flex: 1,
+                  fontSize: '12px', 
+                  background: 'white', 
+                  padding: '8px 12px', 
+                  borderRadius: '6px',
+                  border: '1px solid #ddd',
+                  fontFamily: 'monospace',
+                  wordBreak: 'break-all'
+                }}>
                   {selectedSession.access_token}
                 </code>
                 <button
                   className="btn-icon"
                   onClick={() => {
                     navigator.clipboard.writeText(`${window.location.origin}/candidate/${selectedSession.access_token}`)
-                    // Ссылка скопирована
                   }}
-                >
-                  <Copy size={14} />
-                </button>
-              </div>
-              
-              <div><strong>Комментарии:</strong></div>
-              <div>{selectedSession.comments?.length || 0}</div>
-              
-              <div><strong>Готовность кандидата:</strong></div>
-              <div>
-                {selectedSession.candidate_ready_at ? (
-                  <div style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '6px',
-                    padding: '6px 12px',
-                    background: '#d4edda',
-                    color: '#155724',
+                  style={{
+                    padding: '8px',
+                    background: '#3498db',
+                    color: 'white',
                     borderRadius: '6px',
-                    fontSize: '13px',
-                    fontWeight: '500',
-                    border: '1px solid #c3e6cb'
-                  }}>
-                    <CheckCircle size={16} />
-                    Готов с {formatDate(selectedSession.candidate_ready_at)}
-                  </div>
-                ) : (
-                  <span style={{ color: '#999' }}>Ожидает...</span>
-                )}
+                    border: 'none',
+                    cursor: 'pointer'
+                  }}
+                  title="Копировать ссылку для кандидата"
+                >
+                  <Copy size={16} />
+                </button>
               </div>
             </div>
 
-            {/* Gitea Integration Section */}
-            {selectedSession.gitea?.enabled && (
-              <div style={{ marginTop: '30px', padding: '20px', background: '#f0f7ff', borderRadius: '8px', border: '1px solid #3498db' }}>
-                <h3 style={{ marginTop: 0, marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <GitBranch size={20} />
-                  Gitea Integration
-                </h3>
-                <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', gap: '10px', marginBottom: '15px' }}>
-                  <div><strong>Пользователь:</strong></div>
-                  <div>{selectedSession.gitea.user}</div>
-                  
-                  <div><strong>Репозиторий:</strong></div>
-                  <div>{selectedSession.gitea.repo}</div>
-                  
-                  {selectedSession.gitea.web_url && (
-                    <>
-                      <div><strong>Web URL:</strong></div>
-                      <div>
-                        <a href={selectedSession.gitea.web_url} target="_blank" rel="noopener noreferrer" style={{ color: '#3498db' }}>
-                          {selectedSession.gitea.web_url}
-                          <ExternalLink size={14} style={{ marginLeft: '4px', display: 'inline' }} />
-                        </a>
-                      </div>
-                    </>
-                  )}
-                  
-                  {selectedSession.gitea.pr_id ? (
-                    <>
-                      <div><strong>Pull Request:</strong></div>
-                      <div>
-                        <a 
-                          href={`${selectedSession.gitea.web_url}/pulls/${selectedSession.gitea.pr_id}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: '#3498db', marginRight: '10px' }}
-                        >
-                          PR #{selectedSession.gitea.pr_id}
-                          <ExternalLink size={14} style={{ marginLeft: '4px', display: 'inline' }} />
-                        </a>
-                        {giteaPR && (
-                          <span style={{ fontSize: '12px', color: '#666', marginLeft: '10px' }}>
-                            {giteaPR.pr?.state || 'open'}
-                          </span>
-                        )}
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div><strong>Pull Request:</strong></div>
-                      <div>
-                        <button
-                          className="btn btn-secondary"
-                          onClick={() => createGiteaPR(selectedSession.id)}
-                          disabled={isLoadingPR}
-                          style={{ fontSize: '12px', padding: '6px 12px' }}
-                        >
-                          <GitMerge size={14} />
-                          Создать PR
-                        </button>
-                      </div>
-                    </>
+            <div style={{ marginTop: '20px' }}>
+              <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                Готовность кандидата
+              </div>
+              {selectedSession.candidate_ready_at ? (
+                <div style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '10px 16px',
+                  background: '#d4edda',
+                  color: '#155724',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  fontWeight: '500',
+                  border: '1px solid #c3e6cb'
+                }}>
+                  <CheckCircle size={18} />
+                  Готов с {formatDate(selectedSession.candidate_ready_at)}
+                </div>
+              ) : (
+                <div style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '10px 16px',
+                  background: '#fff3cd',
+                  color: '#856404',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  fontWeight: '500',
+                  border: '1px solid #ffc107'
+                }}>
+                  <Clock size={18} />
+                  Ожидает...
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Gitea Integration Section */}
+          {selectedSession.gitea?.enabled && (
+            <div style={{ marginTop: '30px', padding: '20px', background: '#f0f7ff', borderRadius: '8px', border: '1px solid #3498db' }}>
+              <h3 style={{ marginTop: 0, marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <GitBranch size={20} />
+                Gitea Integration
+              </h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', gap: '10px', marginBottom: '15px' }}>
+                <div><strong>Пользователь:</strong></div>
+                <div>{selectedSession.gitea.user}</div>
+                
+                <div><strong>Репозиторий:</strong></div>
+                <div>{selectedSession.gitea.repo}</div>
+                
+                {selectedSession.gitea.web_url && (
+                  <>
+                    <div><strong>Web URL:</strong></div>
+                    <div>
+                      <a href={selectedSession.gitea.web_url} target="_blank" rel="noopener noreferrer" style={{ color: '#3498db' }}>
+                        {selectedSession.gitea.web_url}
+                        <ExternalLink size={14} style={{ marginLeft: '4px', display: 'inline' }} />
+                      </a>
+                    </div>
+                  </>
+                )}
+                
+                {selectedSession.gitea.pr_id ? (
+                  <>
+                    <div><strong>Pull Request:</strong></div>
+                    <div>
+                      <a 
+                        href={`${selectedSession.gitea.web_url}/pulls/${selectedSession.gitea.pr_id}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ color: '#3498db', marginRight: '10px' }}
+                      >
+                        PR #{selectedSession.gitea.pr_id}
+                        <ExternalLink size={14} style={{ marginLeft: '4px', display: 'inline' }} />
+                      </a>
+                      {giteaPR && (
+                        <span style={{ fontSize: '12px', color: '#666', marginLeft: '10px' }}>
+                          {giteaPR.pr?.state || 'open'}
+                        </span>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div><strong>Pull Request:</strong></div>
+                    <div>
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => createGiteaPR(selectedSession.id)}
+                        disabled={isLoadingPR}
+                        style={{ fontSize: '12px', padding: '6px 12px' }}
+                      >
+                        <GitMerge size={14} />
+                        Создать PR
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+              
+              {selectedSession.gitea.pr_id && (
+                <div style={{ display: 'flex', gap: '8px', marginTop: '15px', flexWrap: 'wrap' }}>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => loadGiteaPR(selectedSession.id)}
+                    disabled={isLoadingPR}
+                    style={{ fontSize: '12px', padding: '6px 12px' }}
+                  >
+                    <RefreshCw size={14} />
+                    Обновить PR
+                  </button>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => syncCommentsFromGitea(selectedSession.id)}
+                    disabled={isLoadingPR}
+                    style={{ fontSize: '12px', padding: '6px 12px' }}
+                    title="Синхронизировать комментарии из Gitea PR в нашу систему (для отчёта)"
+                  >
+                    <RefreshCw size={14} />
+                    Загрузить комментарии из Gitea
+                  </button>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => syncGiteaComments(selectedSession.id)}
+                    disabled={isLoadingPR}
+                    style={{ fontSize: '12px', padding: '6px 12px' }}
+                    title="Отправить комментарии из нашей системы в Gitea PR"
+                  >
+                    <GitMerge size={14} />
+                    Отправить в Gitea
+                  </button>
+                </div>
+              )}
+              
+              {giteaPR && (
+                <div style={{ marginTop: '15px', padding: '10px', background: 'white', borderRadius: '4px' }}>
+                  <div style={{ fontSize: '12px', color: '#666', marginBottom: '5px' }}>
+                    Комментариев в PR: {giteaPR.comments?.length || 0}
+                  </div>
+                  {giteaPR.pr?.body && (
+                    <div style={{ fontSize: '12px', color: '#333', marginTop: '5px' }}>
+                      <strong>Описание:</strong> {giteaPR.pr.body.substring(0, 100)}...
+                    </div>
                   )}
                 </div>
-                
-                {selectedSession.gitea.pr_id && (
-                  <div style={{ display: 'flex', gap: '8px', marginTop: '15px', flexWrap: 'wrap' }}>
-                    <button
-                      className="btn btn-secondary"
-                      onClick={() => loadGiteaPR(selectedSession.id)}
-                      disabled={isLoadingPR}
-                      style={{ fontSize: '12px', padding: '6px 12px' }}
-                    >
-                      <RefreshCw size={14} />
-                      Обновить PR
-                    </button>
-                    <button
-                      className="btn btn-secondary"
-                      onClick={() => syncCommentsFromGitea(selectedSession.id)}
-                      disabled={isLoadingPR}
-                      style={{ fontSize: '12px', padding: '6px 12px' }}
-                      title="Синхронизировать комментарии из Gitea PR в нашу систему (для отчёта)"
-                    >
-                      <RefreshCw size={14} />
-                      Загрузить комментарии из Gitea
-                    </button>
-                    <button
-                      className="btn btn-secondary"
-                      onClick={() => syncGiteaComments(selectedSession.id)}
-                      disabled={isLoadingPR}
-                      style={{ fontSize: '12px', padding: '6px 12px' }}
-                      title="Отправить комментарии из нашей системы в Gitea PR"
-                    >
-                      <GitMerge size={14} />
-                      Отправить в Gitea
-                    </button>
-                  </div>
-                )}
-                
-                {giteaPR && (
-                  <div style={{ marginTop: '15px', padding: '10px', background: 'white', borderRadius: '4px' }}>
-                    <div style={{ fontSize: '12px', color: '#666', marginBottom: '5px' }}>
-                      Комментариев в PR: {giteaPR.comments?.length || 0}
-                    </div>
-                    {giteaPR.pr?.body && (
-                      <div style={{ fontSize: '12px', color: '#333', marginTop: '5px' }}>
-                        <strong>Описание:</strong> {giteaPR.pr.body.substring(0, 100)}...
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+              )}
+            </div>
+          )}
 
-            <h3 style={{ marginTop: '30px', marginBottom: '15px' }}>Комментарии ({selectedSession.comments?.length || 0})</h3>
+          <div className="card" style={{ marginTop: '20px' }}>
+            <h2 style={{ marginTop: 0 }}>Комментарии ({selectedSession.comments?.length || 0})</h2>
             {selectedSession.comments && selectedSession.comments.length > 0 ? (
               <div>
-                {selectedSession.comments.map((comment, i) => (
-                  <div key={i} style={{ 
-                    padding: '12px', 
-                    marginBottom: '10px', 
-                    background: '#f8f9fa', 
-                    borderRadius: '8px',
-                    borderLeft: '3px solid #3498db'
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
-                      <strong>{comment.file}:{comment.line_range}</strong>
-                      <span style={{ fontSize: '12px', color: '#666' }}>
-                        {comment.type} • {comment.severity}
-                      </span>
+                {selectedSession.comments.map((comment, i) => {
+                  const severityColors = {
+                    critical: { border: '#c62828', bg: '#ffebee' },
+                    high: { border: '#e65100', bg: '#fff3e0' },
+                    medium: { border: '#f57f17', bg: '#fffde7' },
+                    low: { border: '#546e7a', bg: '#f3f4f7' }
+                  }
+                  const style = severityColors[comment.severity] || severityColors.medium
+                  
+                  return (
+                    <div key={i} style={{ 
+                      padding: '16px', 
+                      marginBottom: '12px', 
+                      background: style.bg, 
+                      borderRadius: '8px',
+                      borderLeft: `4px solid ${style.border}`,
+                      border: `1px solid ${style.border}20`,
+                      transition: 'all 0.2s'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.transform = 'translateX(4px)'
+                      e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.1)'
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.transform = 'translateX(0)'
+                      e.currentTarget.style.boxShadow = 'none'
+                    }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '8px', flexWrap: 'wrap', gap: '8px' }}>
+                        <div>
+                          <strong style={{ fontSize: '14px', color: '#1a1a1a' }}>
+                            {comment.file}
+                          </strong>
+                          <span style={{ fontSize: '13px', color: '#666', marginLeft: '8px' }}>
+                            строки {comment.line_range}
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                          <span style={{ 
+                            fontSize: '11px', 
+                            padding: '4px 8px',
+                            background: 'white',
+                            borderRadius: '12px',
+                            color: '#666',
+                            fontWeight: '500'
+                          }}>
+                            {comment.type}
+                          </span>
+                          <span style={{ 
+                            fontSize: '11px', 
+                            padding: '4px 8px',
+                            background: style.border,
+                            color: 'white',
+                            borderRadius: '12px',
+                            fontWeight: '600',
+                            textTransform: 'uppercase'
+                          }}>
+                            {comment.severity}
+                          </span>
+                        </div>
+                      </div>
+                      <div style={{ 
+                        fontSize: '14px', 
+                        color: '#333',
+                        lineHeight: '1.6',
+                        whiteSpace: 'pre-wrap'
+                      }}>
+                        {comment.text}
+                      </div>
                     </div>
-                    <div>{comment.text}</div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             ) : (
-              <p style={{ color: '#666' }}>Комментариев пока нет</p>
+              <div style={{
+                padding: '40px',
+                textAlign: 'center',
+                color: '#999',
+                background: '#f8f9fa',
+                borderRadius: '8px',
+                border: '1px dashed #ddd'
+              }}>
+                <MessageSquare size={48} style={{ opacity: 0.3, marginBottom: '12px' }} />
+                <p style={{ margin: 0, fontSize: '16px' }}>Комментариев пока нет</p>
+              </div>
             )}
           </div>
         </div>
@@ -1031,9 +1361,89 @@ export default function ReviewerDashboard() {
               </div>
               <div style={{
                 padding: '28px',
-                background: theme === 'dark' ? '#1e1e1e' : '#f8f9fa'
+                background: theme === 'dark' ? '#1e1e1e' : '#f8f9fa',
+                position: 'relative'
               }}>
-                <div style={{ marginBottom: '20px' }}>
+                {/* Круговой индикатор загрузки */}
+                {isLoading && (
+                  <div style={{
+                    position: 'absolute',
+                    top: '50%',
+                    left: '50%',
+                    transform: 'translate(-50%, -50%)',
+                    zIndex: 10,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: '16px',
+                    background: theme === 'dark' ? 'rgba(45, 45, 45, 0.95)' : 'rgba(255, 255, 255, 0.95)',
+                    padding: '40px',
+                    borderRadius: '16px',
+                    boxShadow: '0 8px 32px rgba(0, 0, 0, 0.2)',
+                    backdropFilter: 'blur(10px)'
+                  }}>
+                    <div style={{
+                      position: 'relative',
+                      width: '120px',
+                      height: '120px'
+                    }}>
+                      {/* Фоновый круг */}
+                      <svg width="120" height="120" style={{ transform: 'rotate(-90deg)' }}>
+                        <circle
+                          cx="60"
+                          cy="60"
+                          r="54"
+                          fill="none"
+                          stroke={theme === 'dark' ? '#444' : '#e9ecef'}
+                          strokeWidth="8"
+                        />
+                        {/* Прогресс круг */}
+                        <circle
+                          cx="60"
+                          cy="60"
+                          r="54"
+                          fill="none"
+                          stroke="#667eea"
+                          strokeWidth="8"
+                          strokeLinecap="round"
+                          strokeDasharray={`${2 * Math.PI * 54}`}
+                          strokeDashoffset={`${2 * Math.PI * 54 * (1 - creationProgress / 100)}`}
+                          style={{
+                            transition: 'stroke-dashoffset 0.3s ease-out'
+                          }}
+                        />
+                      </svg>
+                      {/* Процент в центре */}
+                      <div style={{
+                        position: 'absolute',
+                        top: '50%',
+                        left: '50%',
+                        transform: 'translate(-50%, -50%)',
+                        fontSize: '24px',
+                        fontWeight: 'bold',
+                        color: theme === 'dark' ? '#fff' : '#1a1a1a',
+                        fontFamily: 'monospace'
+                      }}>
+                        {Math.round(creationProgress)}%
+                      </div>
+                    </div>
+                    <div style={{
+                      fontSize: '16px',
+                      fontWeight: '500',
+                      color: theme === 'dark' ? '#e0e0e0' : '#495057',
+                      textAlign: 'center'
+                    }}>
+                      {creationProgressMessage || 'Создание сессии...'}
+                    </div>
+                  </div>
+                )}
+                
+                <div style={{ 
+                  marginBottom: '20px',
+                  opacity: isLoading ? 0.3 : 1,
+                  pointerEvents: isLoading ? 'none' : 'auto',
+                  transition: 'opacity 0.3s ease'
+                }}>
                   <label style={{ 
                     display: 'block', 
                     marginBottom: '8px', 
@@ -1076,7 +1486,12 @@ export default function ReviewerDashboard() {
                     }}
                   />
                 </div>
-                <div style={{ marginBottom: '20px' }}>
+                <div style={{ 
+                  marginBottom: '20px',
+                  opacity: isLoading ? 0.3 : 1,
+                  pointerEvents: isLoading ? 'none' : 'auto',
+                  transition: 'opacity 0.3s ease'
+                }}>
                   <label style={{ 
                     display: 'block', 
                     marginBottom: '8px', 
@@ -1118,7 +1533,12 @@ export default function ReviewerDashboard() {
                     }}
                   />
                 </div>
-                <div style={{ marginBottom: '24px' }}>
+                <div style={{ 
+                  marginBottom: '24px',
+                  opacity: isLoading ? 0.3 : 1,
+                  pointerEvents: isLoading ? 'none' : 'auto',
+                  transition: 'opacity 0.3s ease'
+                }}>
                   <label style={{ 
                     display: 'block', 
                     marginBottom: '8px', 
@@ -1160,6 +1580,8 @@ export default function ReviewerDashboard() {
                     }}
                   />
                 </div>
+
+
                 <div style={{ 
                   display: 'flex', 
                   gap: '12px', 

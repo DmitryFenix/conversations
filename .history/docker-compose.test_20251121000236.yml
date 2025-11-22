@@ -1,0 +1,32 @@
+# Docker Compose конфигурация для запуска тестов
+# Использование:
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d  # Запустить сервисы
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml run --rm tests  # Запустить тесты
+# 
+# ВАЖНО: Этот файл используется как override для docker-compose.yml
+# Он не может работать отдельно, так как зависит от сервисов из основного файла
+
+services:
+  api:
+    environment:
+      - DB_PATH=/tmp/reviews.db
+    volumes:
+      - /tmp:/tmp  # Для создания БД в /tmp
+      - ./artifacts:/artifacts  # Для создания diff файлов
+
+  tests:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+    volumes:
+      - ./tests:/app/tests
+    environment:
+      - API_BASE_URL=http://api:8000
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    # Команда по умолчанию - запуск всех тестов
+    command: ["pytest", "test_api.py", "-v", "--tb=short", "--color=yes"]

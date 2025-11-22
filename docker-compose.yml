@@ -13,6 +13,11 @@ services:
       - ./api/main.py:/app/main.py
       - ./api/eval_worker.py:/app/eval_worker.py
       - ./api/gitea_client.py:/app/gitea_client.py
+      - ./api/mr_database.py:/app/mr_database.py
+      - ./api/mr_classifier.py:/app/mr_classifier.py
+      - ./api/migrations:/app/migrations
+      # Скрипты для работы с MR
+      - ./scripts:/app/scripts
       # Примечание: rq_monitor.py и rq_dashboard.py не монтируем для hot reload
       # Изменения в этих файлах требуют пересборки образа
     # Hot reload: используем uvicorn с --reload для автоматической перезагрузки при изменениях
@@ -24,6 +29,12 @@ services:
       - GITEA_URL=http://gitea:4000
       - GITEA_WEB_URL=http://localhost:4001  # Для доступа из браузера
       - GITEA_ADMIN_TOKEN=${GITEA_ADMIN_TOKEN:-}
+      # PostgreSQL для Merge Requests
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=mr_database
+      - POSTGRES_USER=mr_user
+      - POSTGRES_PASSWORD=mr_password
     depends_on:
       redis:
         condition: service_healthy
@@ -53,7 +64,7 @@ services:
     build:
       context: .              # ← ТОЖЕ ВСЁ ДЕРЕВО
       dockerfile: api/Dockerfile
-    command: [ "rq", "worker", "default" ]
+    command: [ "rq", "worker", "default", "--with-scheduler" ]
     volumes:
       - ./artifacts:/artifacts
       - ./mr_packages:/mr_packages
@@ -67,6 +78,7 @@ services:
     environment:
       - RQ_REDIS_URL=redis://redis:6379
       - PYTHONUNBUFFERED=1
+    restart: always  # Автоматически перезапускать worker при падении
 
   gitea:
     image: gitea/gitea:1.22.2
@@ -87,6 +99,49 @@ services:
       - "4001:4000"  # Внешний порт 4001, внутренний 4000
       - "2222:22"
     restart: always
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres_mr
+    environment:
+      - POSTGRES_DB=mr_database
+      - POSTGRES_USER=mr_user
+      - POSTGRES_PASSWORD=mr_password
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mr_user -d mr_database"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: always
+    user: "999:999"  # Используем фиксированный UID/GID для избежания проблем с правами в WSL
+
+  # Сервис для автоматической настройки MR базы данных (запускается вручную)
+  setup-mr-db:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    volumes:
+      - ./scripts:/app/scripts
+      - ./artifacts:/app/artifacts
+      - ./mrs_collected.json:/app/mrs_collected.json
+      - ./postgres_data:/app/postgres_data
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=mr_database
+      - POSTGRES_USER=mr_user
+      - POSTGRES_PASSWORD=mr_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-c", "python scripts/collect_mrs.py --artifacts /app/artifacts --output /app/mrs_collected.json && python scripts/import_mrs.py /app/mrs_collected.json"]
+    profiles:
+      - setup  # Запускается только с профилем setup
 
   # Тесты как отдельный сервис
   tests:
@@ -109,3 +164,6 @@ services:
     # Или для непрерывного запуска: docker compose run --rm tests pytest-watch
     profiles:
       - testing  # Запускается только с профилем testing
+
+volumes:
+  postgres_data:  # Именованный том для PostgreSQL (решает проблемы с правами в WSL)

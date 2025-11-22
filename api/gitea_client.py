@@ -51,15 +51,25 @@ class GiteaClient:
             
             return response.json() if response.content else {}
         except requests.exceptions.RequestException as e:
-            logger.error(f"Gitea API error {method} {endpoint}: {e}")
+            # Определяем уровень логирования в зависимости от статуса ошибки
+            status_code = None
             if hasattr(e, 'response') and e.response is not None:
-                try:
-                    error_data = e.response.json()
-                    logger.error(f"Error response: {error_data}")
-                except ValueError as json_err:
-                    # Если не удалось распарсить JSON, выводим сырой текст
-                    logger.error(f"Error response text (not JSON): {e.response.text[:500]}")
-                    logger.error(f"JSON parse error: {json_err}")
+                status_code = e.response.status_code
+            
+            # 404 ошибки логируем как debug (файл не найден - это нормально)
+            if status_code == 404:
+                logger.debug(f"Gitea API {method} {endpoint}: 404 Not Found (this is normal if resource doesn't exist)")
+            else:
+                # Другие ошибки логируем как error
+                logger.error(f"Gitea API error {method} {endpoint}: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    try:
+                        error_data = e.response.json()
+                        logger.error(f"Error response: {error_data}")
+                    except ValueError as json_err:
+                        # Если не удалось распарсить JSON, выводим сырой текст
+                        logger.error(f"Error response text (not JSON): {e.response.text[:500]}")
+                        logger.error(f"JSON parse error: {json_err}")
             return None
     
     def get_user(self, username: str) -> Optional[Dict]:
@@ -266,6 +276,27 @@ class GiteaClient:
             logger.error(f"Failed to create branch {branch_name} from {from_branch}")
         return result
     
+    def get_file_info(self, owner: str, repo: str, file_path: str, branch: str = "main") -> Optional[Dict]:
+        """
+        Получить информацию о файле в репозитории
+        
+        Args:
+            owner: Владелец репозитория
+            repo: Имя репозитория
+            file_path: Путь к файлу
+            branch: Ветка
+            
+        Returns:
+            Информация о файле (включая SHA) или None если файл не существует
+        """
+        try:
+            result = self._request("GET", f"/repos/{owner}/{repo}/contents/{file_path}", params={"ref": branch})
+            return result if result and isinstance(result, dict) else None
+        except Exception as e:
+            # Файл не существует или другая ошибка
+            logger.debug(f"File {file_path} not found or error: {e}")
+            return None
+    
     def update_file(self, owner: str, repo: str, file_path: str, content: str, message: str = "Update file", branch: str = "main", sha: str = None) -> Optional[Dict]:
         """
         Обновить файл в репозитории
@@ -446,20 +477,15 @@ class GiteaClient:
             logger.warning(f"Failed to get PR files: {e}")
         
         # Способ 3: Пробуем получить комментарии напрямую (может работать в некоторых версиях Gitea)
-        direct_url = f"{self.base_url}/api/v1/repos/{owner}/{repo}/pulls/{pr_index}/comments"
-        try:
-            direct_response = requests.get(direct_url, headers=self.headers)
-            if direct_response.status_code == 200:
-                direct_comments = direct_response.json() if direct_response.content else []
-                logger.info(f"Found {len(direct_comments)} comments via direct endpoint")
-                # Объединяем, избегая дубликатов
-                existing_ids = {c.get("id") for c in all_comments if c.get("id")}
-                for comment in direct_comments:
-                    if comment.get("id") not in existing_ids:
-                        all_comments.append(comment)
-        except requests.exceptions.RequestException as e:
-            if hasattr(e, 'response') and e.response is not None and e.response.status_code != 404:
-                logger.warning(f"Failed to get comments via direct endpoint: {e}")
+        # Используем _request для консистентного логирования (404 будет логироваться как debug)
+        direct_comments_result = self._request("GET", f"/repos/{owner}/{repo}/pulls/{pr_index}/comments")
+        if direct_comments_result and isinstance(direct_comments_result, list):
+            logger.info(f"Found {len(direct_comments_result)} comments via direct endpoint")
+            # Объединяем, избегая дубликатов
+            existing_ids = {c.get("id") for c in all_comments if c.get("id")}
+            for comment in direct_comments_result:
+                if comment.get("id") not in existing_ids:
+                    all_comments.append(comment)
         
         logger.info(f"Total review comments found: {len(all_comments)}")
         if all_comments:

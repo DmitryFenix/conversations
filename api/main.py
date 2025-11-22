@@ -1,9 +1,10 @@
 # api/main.py
-from fastapi import FastAPI, Request, HTTPException, File, UploadFile
+from fastapi import FastAPI, Request, HTTPException, File, UploadFile, BackgroundTasks, Body
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from typing import Optional, List
 import sqlite3
 import json
 import os
@@ -36,6 +37,46 @@ if db_dir and not os.path.exists(db_dir):
 SESSION_RETENTION_DAYS = int(os.getenv("SESSION_RETENTION_DAYS", "2"))
 SESSION_CLEANUP_INTERVAL_SECONDS = int(os.getenv("SESSION_CLEANUP_INTERVAL_SECONDS", "3600"))
 SESSION_RETENTION_DELTA = timedelta(days=SESSION_RETENTION_DAYS)
+
+# === Прогресс создания сессий ===
+# Храним прогресс создания сессий: session_id -> {"progress": 0-100, "message": "..."}
+session_creation_progress = {}
+progress_lock = threading.Lock()
+
+def update_progress(session_id: int, progress: int, message: str = ""):
+    """Обновить прогресс создания сессии"""
+    with progress_lock:
+        session_creation_progress[session_id] = {
+            "progress": min(100, max(0, progress)),
+            "message": message,
+            "timestamp": time.time()
+        }
+
+def get_progress(session_id: int):
+    """Получить текущий прогресс создания сессии"""
+    with progress_lock:
+        return session_creation_progress.get(session_id, {"progress": 0, "message": "Неизвестно", "timestamp": 0})
+
+# === PostgreSQL для Merge Requests ===
+try:
+    # Добавляем текущую директорию в путь для импорта
+    import sys
+    import os
+    if os.path.dirname(__file__) not in sys.path:
+        sys.path.insert(0, os.path.dirname(__file__))
+    
+    from mr_database import init_mr_database, init_connection_pool
+    # Инициализируем пул соединений при старте
+    init_connection_pool()
+    # Инициализируем структуру БД
+    init_mr_database()
+    logger.info("MR database module loaded successfully")
+except ImportError as e:
+    logger.warning(f"MR database module not available (ImportError): {e}")
+    # Продолжаем работу без MR функциональности
+except Exception as e:
+    logger.warning(f"MR database module not available: {e}", exc_info=True)
+    # Продолжаем работу без MR функциональности
 
 # === GITEA ===
 from gitea_client import GiteaClient
@@ -182,6 +223,15 @@ def init_db():
     # === Поле для готовности кандидата ===
     if 'candidate_ready_at' not in columns:
         c.execute("ALTER TABLE sessions ADD COLUMN candidate_ready_at TEXT")
+    
+    # Добавляем поле для связи с Merge Request (если ещё не добавлено)
+    try:
+        c.execute("ALTER TABLE sessions ADD COLUMN mr_id INTEGER")
+        conn.commit()
+        logger.info("Added mr_id column to sessions table")
+    except sqlite3.OperationalError:
+        # Колонка уже существует
+        pass
         print("Added column: candidate_ready_at")
 
     conn.commit()
@@ -467,6 +517,8 @@ class ReviewerSessionCreate(BaseModel):
     candidate_name: str
     mr_package: str
     reviewer_name: str = "Reviewer"
+    mr_id: Optional[int] = None  # ID Merge Request для использования в сессии (для обратной совместимости)
+    mr_ids: Optional[List[int]] = None  # Список ID MR для использования в сессии (если несколько)
 
 # === API: Создать сессию (старый endpoint для обратной совместимости) ===
 @app.post("/api/sessions")
@@ -518,6 +570,9 @@ index abc123..def456 100644
 @app.post("/api/reviewer/sessions")
 def reviewer_create_session(payload: ReviewerSessionCreate):
     logger.info(f"Reviewer creating session for candidate={payload.candidate_name}, reviewer={payload.reviewer_name}")
+    
+    # Инициализируем прогресс (будем обновлять по мере создания)
+    # Сначала создадим сессию, чтобы получить session_id
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
@@ -565,17 +620,63 @@ def reviewer_create_session(payload: ReviewerSessionCreate):
     gitea_enabled = 0
 
     # Сначала всегда создаём сессию, чтобы получить session_id
+    # Если указан mr_id или mr_ids, используем diff из MR вместо создания нового
+    mr_id = getattr(payload, 'mr_id', None)
+    mr_ids = getattr(payload, 'mr_ids', None) or []
+    
+    # Если указан mr_id, добавляем его в список
+    if mr_id and mr_id not in mr_ids:
+        mr_ids.append(mr_id)
+    
+    # Сохраняем первый mr_id для обратной совместимости
+    first_mr_id = mr_ids[0] if mr_ids else mr_id
+    
     c.execute(
-        "INSERT INTO sessions (candidate_name, mr_package, comments, created_at, expires_at, access_token, reviewer_token, reviewer_name, status, candidate_id, gitea_user, gitea_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (payload.candidate_name, payload.mr_package, json.dumps([]), now.isoformat() + 'Z', expires_at.isoformat() + 'Z', access_token, reviewer_token, payload.reviewer_name, 'active', candidate_id_safe, gitea_user if gitea_client else None, 0)
+        "INSERT INTO sessions (candidate_name, mr_package, comments, created_at, expires_at, access_token, reviewer_token, reviewer_name, status, candidate_id, gitea_user, gitea_enabled, mr_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (payload.candidate_name, payload.mr_package, json.dumps([]), now.isoformat() + 'Z', expires_at.isoformat() + 'Z', access_token, reviewer_token, payload.reviewer_name, 'active', candidate_id_safe, gitea_user if gitea_client else None, 0, first_mr_id)
     )
     session_id = c.lastrowid
     conn.commit()
+    
+    update_progress(session_id, 15, "Сессия создана в базе данных")
+    
+    # Если указаны MR, загружаем diff из них
+    if mr_ids:
+        try:
+            from mr_database import get_merge_request
+            artifacts_dir = "/artifacts"
+            if not os.path.exists(artifacts_dir):
+                os.makedirs(artifacts_dir, exist_ok=True)
+            
+            # Объединяем diff из всех выбранных MR
+            combined_diff = []
+            total_points = 0
+            mr_titles = []
+            
+            for mr_id_item in mr_ids:
+                mr = get_merge_request(mr_id_item)
+                if mr:
+                    if mr.get('diff_content'):
+                        mr_title = mr.get('title', f'MR #{mr_id_item}')
+                        combined_diff.append(f"\n\n=== MR #{mr_id_item}: {mr_title} ===\n")
+                        combined_diff.append(f"Type: {mr.get('mr_type', 'unknown')}, Points: {mr.get('complexity_points', 3)}\n")
+                        combined_diff.append(mr['diff_content'])
+                        total_points += mr.get('complexity_points', 3)
+                        mr_titles.append(mr_title)
+            
+            if combined_diff:
+                diff_path = f"/artifacts/{session_id}_diff.patch"
+                with open(diff_path, 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(combined_diff))
+                logger.info(f"Loaded diff from {len(mr_ids)} MR(s) (total {total_points} points): {', '.join(mr_titles[:3])}")
+        except Exception as e:
+            logger.warning(f"Failed to load diff from MR(s): {e}", exc_info=True)
     
     # Интеграция с Gitea (если клиент инициализирован)
     gitea_clone_url = None
     if gitea_client:
         try:
+            update_progress(session_id, 25, "Создание пользователя Gitea...")
             # 1. Создаём пользователя для кандидата (или используем существующего)
             candidate_email = f"{gitea_user}@code-review.local"
             user_result = gitea_client.create_user(
@@ -593,6 +694,7 @@ def reviewer_create_session(payload: ReviewerSessionCreate):
             
             # Продолжаем создание репозитория даже если пользователь уже существует
             
+            update_progress(session_id, 40, "Создание репозитория Gitea...")
             # Теперь создаём репозиторий с session_id
             gitea_repo = f"session_{session_id}"
             repo_result = gitea_client.create_repository(
@@ -604,6 +706,7 @@ def reviewer_create_session(payload: ReviewerSessionCreate):
             
             if repo_result:
                 logger.info(f"Created Gitea repository: {gitea_user}/{gitea_repo}")
+                update_progress(session_id, 55, "Репозиторий создан, создание ветки...")
                 
                 # Минимальная задержка для инициализации репозитория
                 import time
@@ -623,6 +726,7 @@ def reviewer_create_session(payload: ReviewerSessionCreate):
                     logger.warning(f"Failed to create branch {candidate_branch}, trying main branch")
                     candidate_branch = "main"
                 
+                update_progress(session_id, 70, "Создание начального файла...")
                 # Создаём файл сразу в нужной ветке (candidate-work-{id} или main)
                 starting_code = f"""# Code Review Session #{session_id}
 # Candidate: {payload.candidate_name}
@@ -661,6 +765,7 @@ def greet():
                     )
                     conn.commit()
                     
+                    update_progress(session_id, 85, "Создание Pull Request...")
                     # Автоматически создаём PR (файл уже в нужной ветке)
                     try:
                         logger.info(f"Creating PR for session {session_id}")
@@ -713,13 +818,18 @@ def greet():
 
     conn.close()
 
-    # Создаём demo diff (для обратной совместимости)
-    artifacts_dir = "/artifacts"
-    if not os.path.exists(artifacts_dir):
-        os.makedirs(artifacts_dir, exist_ok=True)
-    
-    diff_path = f"{artifacts_dir}/{session_id}_diff.patch"
-    demo_diff = """diff --git a/main.py b/main.py
+    update_progress(session_id, 95, "Создание артефактов...")
+    # Создаём demo diff (только если не использованы MR)
+    # mr_ids определён выше в функции
+    if not (mr_ids or mr_id):
+        artifacts_dir = "/artifacts"
+        if not os.path.exists(artifacts_dir):
+            os.makedirs(artifacts_dir, exist_ok=True)
+        
+        diff_path = f"{artifacts_dir}/{session_id}_diff.patch"
+        # Проверяем, не создан ли уже diff из MR(s)
+        if not os.path.exists(diff_path):
+            demo_diff = """diff --git a/main.py b/main.py
 index abc123..def456 100644
 --- a/main.py
 +++ b/main.py
@@ -730,12 +840,14 @@ index abc123..def456 100644
 +    # TODO: add input validation
      return True
 """
-    try:
-        with open(diff_path, "w") as f:
-            f.write(demo_diff)
-    except Exception as e:
-        logger.warning(f"Failed to create demo diff: {e}")
+            try:
+                with open(diff_path, "w") as f:
+                    f.write(demo_diff)
+            except Exception as e:
+                logger.warning(f"Failed to create demo diff: {e}")
 
+    update_progress(session_id, 100, "Готово!")
+    
     response = {
         "session_id": session_id,
         "access_token": access_token,
@@ -754,7 +866,403 @@ index abc123..def456 100644
             "web_url": f"{GITEA_WEB_URL}/{gitea_user}/{gitea_repo}"
         }
     
+    # Удаляем прогресс через 5 секунд после завершения
+    def cleanup_progress():
+        time.sleep(5)
+        with progress_lock:
+            session_creation_progress.pop(session_id, None)
+    
+    threading.Thread(target=cleanup_progress, daemon=True).start()
+    
     return response
+
+# === API: Получить прогресс создания сессии ===
+@app.get("/api/reviewer/sessions/{session_id}/creation-progress")
+def get_session_creation_progress(session_id: int):
+    """Получить текущий прогресс создания сессии"""
+    progress_data = get_progress(session_id)
+    return {
+        "session_id": session_id,
+        "progress": progress_data["progress"],
+        "message": progress_data["message"],
+        "timestamp": progress_data["timestamp"]
+    }
+
+# === API: Merge Requests ===
+try:
+    from mr_database import (
+        get_merge_request, list_merge_requests, search_merge_requests,
+        get_mr_files, get_mr_comments
+    )
+    
+    @app.get("/api/mr/list")
+    def mr_list(
+        language: Optional[str] = None,
+        difficulty_level: Optional[str] = None,
+        change_type: Optional[str] = None,
+        min_complexity: Optional[float] = None,
+        max_complexity: Optional[float] = None,
+        mr_type: Optional[str] = None,
+        min_complexity_points: Optional[int] = None,
+        max_complexity_points: Optional[int] = None,
+        stack_tag: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0
+    ):
+        """Получить список MR с фильтрацией"""
+        stack_tags = [stack_tag] if stack_tag else None
+        mrs = list_merge_requests(
+            language=language,
+            difficulty_level=difficulty_level,
+            change_type=change_type,
+            min_complexity=min_complexity,
+            max_complexity=max_complexity,
+            mr_type=mr_type,
+            min_complexity_points=min_complexity_points,
+            max_complexity_points=max_complexity_points,
+            stack_tags=stack_tags,
+            limit=limit,
+            offset=offset
+        )
+        return {"merge_requests": mrs, "total": len(mrs)}
+    
+    @app.get("/api/mr/recommend")
+    def mr_recommend(
+        target_grade: str,  # junior, middle, senior
+        stack_tags: Optional[str] = None,  # Через запятую: "python,backend"
+        target_points: Optional[int] = None,  # Целевое количество баллов
+        mr_types: Optional[str] = None  # Через запятую: "bugfix,feature"
+    ):
+        """
+        Рекомендации MR для кандидата
+        
+        Args:
+            target_grade: junior (3-4 балла), middle (5-7), senior (8-10)
+            stack_tags: Теги стека через запятую
+            target_points: Целевое количество баллов (опционально)
+            mr_types: Типы MR через запятую (опционально)
+        """
+        # Определяем целевой диапазон баллов
+        grade_ranges = {
+            'junior': (3, 4),
+            'middle': (5, 7),
+            'senior': (8, 10)
+        }
+        
+        min_points, max_points = grade_ranges.get(target_grade.lower(), (5, 7))
+        if target_points:
+            min_points = max(1, target_points - 1)
+            max_points = target_points + 1
+        
+        # Парсим теги стека
+        stack_tags_list = None
+        if stack_tags:
+            stack_tags_list = [tag.strip() for tag in stack_tags.split(',')]
+        
+        # Парсим типы MR
+        mr_types_list = None
+        if mr_types:
+            mr_types_list = [t.strip() for t in mr_types.split(',')]
+        
+        # Получаем все подходящие MR
+        all_mrs = list_merge_requests(
+            stack_tags=stack_tags_list,
+            limit=100  # Достаточно для подбора
+        )
+        
+        # Фильтруем по типам если указаны
+        if mr_types_list:
+            all_mrs = [mr for mr in all_mrs if mr.get('mr_type') in mr_types_list]
+        
+        # Сортируем по баллам сложности
+        all_mrs.sort(key=lambda x: x.get('complexity_points', 3))
+        
+        # Подбираем набор MR для достижения целевого диапазона баллов
+        selected_mrs = []
+        total_points = 0
+        
+        for mr in all_mrs:
+            points = mr.get('complexity_points', 3)
+            if total_points + points <= max_points:
+                selected_mrs.append(mr)
+                total_points += points
+                if total_points >= min_points:
+                    break
+        
+        return {
+            "recommended_mrs": selected_mrs,
+            "total_points": total_points,
+            "target_range": f"{min_points}-{max_points}",
+            "grade": target_grade
+        }
+    
+    @app.get("/api/mr/{mr_id}")
+    def mr_get(mr_id: int):
+        """Получить детали MR"""
+        mr = get_merge_request(mr_id)
+        if not mr:
+            raise HTTPException(status_code=404, detail="Merge Request not found")
+        return mr
+    
+    @app.get("/api/mr/{mr_id}/diff")
+    def mr_get_diff(mr_id: int):
+        """Получить diff MR"""
+        mr = get_merge_request(mr_id)
+        if not mr:
+            raise HTTPException(status_code=404, detail="Merge Request not found")
+        
+        diff_content = mr.get('diff_content')
+        if not diff_content:
+            # Пробуем загрузить из файла
+            diff_path = mr.get('diff_path')
+            if diff_path and os.path.exists(diff_path):
+                with open(diff_path, 'r', encoding='utf-8') as f:
+                    diff_content = f.read()
+            else:
+                raise HTTPException(status_code=404, detail="Diff not found")
+        
+        from fastapi.responses import Response
+        return Response(content=diff_content, media_type="text/plain; charset=utf-8")
+    
+    @app.get("/api/mr/{mr_id}/files")
+    def mr_get_files(mr_id: int):
+        """Получить список файлов в MR"""
+        files = get_mr_files(mr_id)
+        return {"files": files}
+    
+    @app.get("/api/mr/{mr_id}/comments")
+    def mr_get_comments(mr_id: int):
+        """Получить комментарии из оригинального ревью MR"""
+        comments = get_mr_comments(mr_id)
+        return {"comments": comments}
+    
+    @app.get("/api/mr/search")
+    def mr_search(q: str, limit: int = 50):
+        """Полнотекстовый поиск по MR"""
+        mrs = search_merge_requests(q, limit=limit)
+        return {"merge_requests": mrs, "total": len(mrs)}
+    
+    @app.put("/api/reviewer/sessions/{session_id}/mrs")
+    def update_session_mrs(session_id: int, payload: dict = Body(...)):
+        """Обновить выбранные MR для сессии"""
+        mr_ids = payload.get('mr_ids', [])
+        
+        # Получаем информацию о сессии (включая Gitea данные)
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT gitea_user, gitea_repo, gitea_enabled FROM sessions WHERE id = ?", (session_id,))
+        session_row = c.fetchone()
+        
+        if not session_row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        gitea_user, gitea_repo, gitea_enabled = session_row
+        
+        if not mr_ids:
+            # Удаляем MR из сессии
+            c.execute("UPDATE sessions SET mr_id = NULL WHERE id = ?", (session_id,))
+            conn.commit()
+            conn.close()
+            return {"message": "MR removed from session"}
+        
+        # Сохраняем первый mr_id для обратной совместимости
+        first_mr_id = mr_ids[0]
+        
+        # Обновляем сессию
+        c.execute("UPDATE sessions SET mr_id = ? WHERE id = ?", (first_mr_id, session_id))
+        conn.commit()
+        conn.close()
+        
+        # Загружаем diff из выбранных MR
+        total_points = 0
+        mr_titles = []
+        files_to_update = {}  # {file_path: new_content}
+        
+        try:
+            artifacts_dir = "/artifacts"
+            if not os.path.exists(artifacts_dir):
+                os.makedirs(artifacts_dir, exist_ok=True)
+            
+            # Объединяем diff из всех выбранных MR
+            combined_diff = []
+            
+            for mr_id_item in mr_ids:
+                mr = get_merge_request(mr_id_item)
+                if mr:
+                    if mr.get('diff_content'):
+                        mr_title = mr.get('title', f'MR #{mr_id_item}')
+                        combined_diff.append(f"\n\n=== MR #{mr_id_item}: {mr_title} ===\n")
+                        combined_diff.append(f"Type: {mr.get('mr_type', 'unknown')}, Points: {mr.get('complexity_points', 3)}\n")
+                        combined_diff.append(mr['diff_content'])
+                        total_points += mr.get('complexity_points', 3)
+                        mr_titles.append(mr_title)
+                        
+                        # Парсим diff для обновления файлов в Gitea
+                        diff_content = mr['diff_content']
+                        parsed_files = parse_diff_simple(diff_content)
+                        logger.info(f"MR #{mr_id_item} ({mr_title}): extracted {len(parsed_files)} file(s): {list(parsed_files.keys())}")
+                        
+                        for file_path, file_content in parsed_files.items():
+                            # Если файл уже есть, объединяем изменения
+                            if file_path in files_to_update:
+                                # Файл уже был добавлен из другого MR - логируем это
+                                logger.warning(f"File {file_path} already exists from another MR, overwriting with content from MR #{mr_id_item}")
+                                files_to_update[file_path] = file_content
+                            else:
+                                files_to_update[file_path] = file_content
+            
+            if combined_diff:
+                diff_path = f"/artifacts/{session_id}_diff.patch"
+                with open(diff_path, 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(combined_diff))
+                logger.info(f"Updated diff from {len(mr_ids)} MR(s) (total {total_points} points) for session {session_id}")
+                logger.info(f"Total unique files to update in Gitea: {len(files_to_update)} - {list(files_to_update.keys())}")
+            
+            # Обновляем файлы в Gitea, если включена
+            if gitea_enabled and gitea_user and gitea_repo and gitea_client and files_to_update:
+                candidate_branch = f"candidate-work-{session_id}"
+                
+                # Фильтруем файлы, которые не должны обновляться в Gitea
+                # (например, uploaded_file из демо diff)
+                files_to_skip = ['uploaded_file']  # Файлы, которые пропускаем
+                filtered_files = {
+                    path: content for path, content in files_to_update.items()
+                    if path not in files_to_skip
+                }
+                
+                logger.info(f"Updating {len(filtered_files)} file(s) in Gitea PR for session {session_id} (skipped {len(files_to_update) - len(filtered_files)} file(s))")
+                
+                for file_path, file_content in filtered_files.items():
+                    try:
+                        # Проверяем, существует ли файл в репозитории
+                        file_info = gitea_client.get_file_info(gitea_user, gitea_repo, file_path, branch=candidate_branch)
+                        
+                        if file_info and file_info.get("sha"):
+                            # Файл существует - обновляем
+                            result = gitea_client.update_file(
+                                owner=gitea_user,
+                                repo=gitea_repo,
+                                file_path=file_path,
+                                content=file_content,
+                                message=f"Update from selected MR(s): {', '.join(mr_titles[:3])}",
+                                branch=candidate_branch,
+                                sha=file_info["sha"]
+                            )
+                            if result:
+                                logger.info(f"Updated file {file_path} in Gitea for session {session_id}")
+                            else:
+                                logger.warning(f"Failed to update file {file_path} in Gitea for session {session_id}")
+                        else:
+                            # Файл не существует - создаём
+                            result = gitea_client.create_file(
+                                owner=gitea_user,
+                                repo=gitea_repo,
+                                file_path=file_path,
+                                content=file_content,
+                                message=f"Create file from selected MR(s): {', '.join(mr_titles[:3])}",
+                                branch=candidate_branch
+                            )
+                            if result:
+                                logger.info(f"Created file {file_path} in Gitea for session {session_id}")
+                            else:
+                                logger.warning(f"Failed to create file {file_path} in Gitea for session {session_id}")
+                    except Exception as e:
+                        # Логируем как warning, так как это может быть нормально (файл не существует или другие не критичные ошибки)
+                        error_str = str(e).lower()
+                        if "404" in error_str or "not found" in error_str:
+                            # Файл не найден - это нормально, пробуем создать
+                            logger.debug(f"File {file_path} not found in Gitea, attempting to create: {e}")
+                        else:
+                            logger.warning(f"Error checking/updating file {file_path} in Gitea: {e}")
+                        
+                        # Пробуем создать файл, если проверка не удалась
+                        try:
+                            result = gitea_client.create_file(
+                                owner=gitea_user,
+                                repo=gitea_repo,
+                                file_path=file_path,
+                                content=file_content,
+                                message=f"Create file from selected MR(s): {', '.join(mr_titles[:3])}",
+                                branch=candidate_branch
+                            )
+                            if result:
+                                logger.info(f"Created file {file_path} in Gitea for session {session_id} (fallback)")
+                        except Exception as create_error:
+                            # Логируем только если это не 404 (файл уже существует или другая ошибка)
+                            error_str = str(create_error).lower()
+                            if "404" not in error_str and "not found" not in error_str:
+                                logger.warning(f"Failed to create file {file_path} in Gitea for session {session_id}: {create_error}")
+                            else:
+                                logger.debug(f"File {file_path} creation skipped (not found or already exists): {create_error}")
+        except Exception as e:
+            logger.warning(f"Failed to update diff from MR(s): {e}", exc_info=True)
+        
+        return {
+            "message": "MR updated successfully",
+            "mr_ids": mr_ids,
+            "total_points": total_points,
+            "files_updated": len(files_to_update) if gitea_enabled else 0
+        }
+    
+    def parse_diff_simple(diff_content: str) -> dict:
+        """
+        Простой парсер diff - извлекает содержимое файлов из diff
+        """
+        files = {}
+        lines = diff_content.split('\n')
+        current_file = None
+        file_lines = []
+        in_file = False
+        
+        for i, line in enumerate(lines):
+            # Начало нового файла
+            if line.startswith('diff --git'):
+                # Сохраняем предыдущий файл
+                if current_file and file_lines:
+                    files[current_file] = '\n'.join(file_lines)
+                
+                # Извлекаем путь к файлу
+                parts = line.split()
+                if len(parts) >= 4:
+                    file_path = parts[3]  # b/path/to/file.py
+                    if file_path.startswith('b/'):
+                        current_file = file_path[2:]  # Убираем 'b/'
+                    else:
+                        current_file = file_path
+                    file_lines = []
+                    in_file = False
+            
+            # Информация о файле (+++)
+            elif line.startswith('+++') and current_file:
+                file_path = line[4:].strip()
+                if file_path and file_path != '/dev/null':
+                    if file_path.startswith('b/'):
+                        current_file = file_path[2:]
+                    else:
+                        current_file = file_path
+            
+            # Начало hunk
+            elif line.startswith('@@') and current_file:
+                in_file = True
+            
+            # Строки кода (только добавленные и контекст)
+            elif in_file and current_file:
+                if line.startswith('+') and not line.startswith('+++'):
+                    file_lines.append(line[1:])  # Убираем '+'
+                elif line.startswith(' ') and file_lines:  # Контекст только если уже есть строки
+                    file_lines.append(line[1:])
+        
+        # Сохраняем последний файл
+        if current_file and file_lines:
+            files[current_file] = '\n'.join(file_lines)
+        
+        return files
+    
+    logger.info("MR API endpoints registered")
+    
+except ImportError:
+    logger.warning("MR database module not available, MR endpoints disabled")
 
 # === API: Reviewer - Список сессий ===
 @app.get("/api/reviewer/sessions")
@@ -859,7 +1367,7 @@ def reviewer_get_session(session_id: int):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     # Показываем сессию даже если она удалена (для просмотра истории)
-    c.execute("SELECT id, candidate_name, reviewer_name, mr_package, comments, created_at, expires_at, status, access_token, gitea_user, gitea_repo, gitea_pr_id, gitea_enabled, deleted_at, candidate_ready_at FROM sessions WHERE id = ?", (session_id,))
+    c.execute("SELECT id, candidate_name, reviewer_name, mr_package, comments, created_at, expires_at, status, access_token, gitea_user, gitea_repo, gitea_pr_id, gitea_enabled, deleted_at, candidate_ready_at, mr_id FROM sessions WHERE id = ?", (session_id,))
     row = c.fetchone()
     conn.close()
     
@@ -885,7 +1393,8 @@ def reviewer_get_session(session_id: int):
         "status": row[7] or "active",
         "access_token": row[8],  # Токен для кандидата
         "deleted_at": row[13] if len(row) > 13 else None,  # deleted_at
-        "candidate_ready_at": row[14] if len(row) > 14 else None  # candidate_ready_at
+        "candidate_ready_at": row[14] if len(row) > 14 else None,  # candidate_ready_at
+        "mr_id": row[15] if len(row) > 15 else None  # mr_id
     }
     
     # Добавляем информацию о Gitea если она доступна
@@ -897,6 +1406,23 @@ def reviewer_get_session(session_id: int):
             "pr_id": row[11],  # gitea_pr_id
             "web_url": f"{GITEA_WEB_URL}/{row[9]}/{row[10]}" if row[9] and row[10] else None
         }
+    
+    # Информация о Merge Request (если привязан)
+    if response.get("mr_id"):
+        try:
+            from mr_database import get_merge_request
+            mr = get_merge_request(response["mr_id"])
+            if mr:
+                response["merge_request"] = {
+                    "id": mr["id"],
+                    "title": mr.get("title"),
+                    "language": mr.get("language"),
+                    "difficulty_level": mr.get("difficulty_level"),
+                    "change_type": mr.get("change_type"),
+                    "complexity_score": mr.get("complexity_score")
+                }
+        except Exception as e:
+            logger.warning(f"Failed to load MR info for session {session_id}: {e}")
     
     return response
 
@@ -1781,6 +2307,61 @@ def reviewer_get_pdf_report(session_id: int):
         with open(report_path, encoding="utf-8") as f:
             report_content = f.read()
 
+    # Статистика по комментариям
+    comments = session.get('comments', [])
+    comments_by_severity = {}
+    comments_by_type = {}
+    for c in comments:
+        severity = c.get('severity', 'medium')
+        comments_by_severity[severity] = comments_by_severity.get(severity, 0) + 1
+        comment_type = c.get('type', 'comment')
+        comments_by_type[comment_type] = comments_by_type.get(comment_type, 0) + 1
+
+    # Форматирование дат
+    def format_date(date_str):
+        if not date_str:
+            return "—"
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            return dt.strftime("%d.%m.%Y %H:%M")
+        except:
+            return date_str
+
+    created_at = format_date(session.get('created_at'))
+    expires_at = format_date(session.get('expires_at'))
+    candidate_ready_at = format_date(session.get('candidate_ready_at'))
+    
+    # Статус сессии
+    status = session.get('status', 'active')
+    status_text = {
+        'active': 'Активна',
+        'finished': 'Завершена',
+        'expired': 'Истекла',
+        'deleted': 'Удалена'
+    }.get(status, status)
+
+    # Gitea информация
+    gitea_info = ""
+    if session.get('gitea', {}).get('enabled'):
+        gitea = session['gitea']
+        gitea_info = f"""
+        <div class="info-box" style="background: #e3f2fd; padding: 15px; border-radius: 8px; margin: 15px 0;">
+            <h3 style="margin-top: 0; color: #1976d2;">Gitea Integration</h3>
+            <p><strong>Пользователь:</strong> {gitea.get('user', '—')}</p>
+            <p><strong>Репозиторий:</strong> {gitea.get('repo', '—')}</p>
+            {f'<p><strong>Pull Request:</strong> PR #{gitea.get("pr_id", "—")}</p>' if gitea.get('pr_id') else ''}
+            {f'<p><strong>Web URL:</strong> {gitea.get("web_url", "—")}</p>' if gitea.get('web_url') else ''}
+        </div>
+        """
+
+    # Оценка из отчёта
+    grade = "—"
+    if 'Grade:' in report_content:
+        grade = report_content.split('Grade:')[-1].strip().split('\n')[0].strip()
+    elif 'Оценка:' in report_content:
+        grade = report_content.split('Оценка:')[-1].strip().split('\n')[0].strip()
+
     html_content = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -1789,51 +2370,136 @@ def reviewer_get_pdf_report(session_id: int):
     <style>
         @page {{ size: A4; margin: 2cm; }}
         body {{ font-family: 'DejaVu Sans', sans-serif; line-height: 1.6; color: #333; }}
-        h1, h2 {{ color: #2c3e50; }}
-        .header {{ border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
-        pre {{ background: #f8f9fa; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 12px; }}
-        table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+        h1, h2, h3 {{ color: #2c3e50; }}
+        .header {{ border-bottom: 3px solid #3498db; padding-bottom: 15px; margin-bottom: 20px; }}
+        .info-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin: 20px 0; }}
+        .info-item {{ background: #f8f9fa; padding: 12px; border-radius: 6px; }}
+        .info-item strong {{ display: block; color: #666; font-size: 0.9em; margin-bottom: 5px; }}
+        .info-item span {{ font-size: 1.1em; color: #1a1a1a; }}
+        .stats-grid {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin: 20px 0; }}
+        .stat-box {{ background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; }}
+        .stat-box .stat-value {{ font-size: 2em; font-weight: bold; color: #3498db; }}
+        .stat-box .stat-label {{ color: #666; font-size: 0.9em; margin-top: 5px; }}
+        pre {{ background: #f8f9fa; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 11px; border: 1px solid #ddd; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 0.9em; }}
         th, td {{ border: 1px solid #ddd; padding: 10px; text-align: left; }}
-        th {{ background: #f2f2f2; }}
+        th {{ background: #3498db; color: white; font-weight: bold; }}
         .critical {{ background: #ffebee; }}
         .high {{ background: #fff3e0; }}
         .medium {{ background: #fffde7; }}
         .low {{ background: #f3f4f7; }}
-        .grade {{ font-size: 2em; font-weight: bold; text-align: center; margin: 20px 0; color: #27ae60; }}
+        .grade-box {{ background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%); color: white; padding: 20px; border-radius: 12px; text-align: center; margin: 20px 0; }}
+        .grade-box .grade-value {{ font-size: 3em; font-weight: bold; margin: 10px 0; }}
+        .grade-box .grade-label {{ font-size: 1.2em; opacity: 0.9; }}
+        .section {{ margin: 30px 0; page-break-inside: avoid; }}
+        .status-badge {{ display: inline-block; padding: 6px 12px; border-radius: 20px; font-size: 0.9em; font-weight: bold; }}
+        .status-active {{ background: #d4edda; color: #155724; }}
+        .status-finished {{ background: #cce5ff; color: #004085; }}
+        .status-expired {{ background: #f8d7da; color: #721c24; }}
+        .status-deleted {{ background: #e2e3e5; color: #383d41; }}
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>Code Review Report</h1>
-        <p><strong>Session ID:</strong> #{session['id']}</p>
-        <p><strong>Candidate:</strong> {session['candidate_name']}</p>
-        <p><strong>Reviewer:</strong> {session.get('reviewer_name', 'Unknown')}</p>
-        <p><strong>Date:</strong> {time.strftime("%d.%m.%Y %H:%M")}</p>
+        <h1 style="margin-top: 0;">Code Review Report</h1>
+        <div class="info-grid">
+            <div class="info-item">
+                <strong>ID Сессии</strong>
+                <span>#{session['id']}</span>
+            </div>
+            <div class="info-item">
+                <strong>Статус</strong>
+                <span class="status-badge status-{status}">{status_text}</span>
+            </div>
+            <div class="info-item">
+                <strong>Кандидат</strong>
+                <span>{session['candidate_name']}</span>
+            </div>
+            <div class="info-item">
+                <strong>Проверяющий</strong>
+                <span>{session.get('reviewer_name', 'Не указан')}</span>
+            </div>
+            <div class="info-item">
+                <strong>MR Package</strong>
+                <span>{session.get('mr_package', '—')}</span>
+            </div>
+            <div class="info-item">
+                <strong>Дата создания</strong>
+                <span>{created_at}</span>
+            </div>
+            <div class="info-item">
+                <strong>Истекает</strong>
+                <span>{expires_at}</span>
+            </div>
+            {f'<div class="info-item"><strong>Готовность кандидата</strong><span>{candidate_ready_at}</span></div>' if candidate_ready_at and candidate_ready_at != "—" else ''}
+        </div>
     </div>
 
+    {gitea_info}
+
     <div class="section">
-        <h2>Evaluation Results</h2>
-        <pre>{report_content}</pre>
-        <div class="grade">
-            {report_content.split('Grade: ')[-1].strip() if 'Grade:' in report_content else '—'}
+        <h2>Оценка</h2>
+        <div class="grade-box">
+            <div class="grade-label">Итоговая оценка</div>
+            <div class="grade-value">{grade}</div>
         </div>
     </div>
 
     <div class="section">
-        <h2>Comments ({len(session['comments'])})</h2>
-        {"" if session['comments'] else "<p>No comments yet.</p>"}
+        <h2>Статистика комментариев</h2>
+        <div class="stats-grid">
+            <div class="stat-box">
+                <div class="stat-value">{len(comments)}</div>
+                <div class="stat-label">Всего комментариев</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{comments_by_severity.get('critical', 0)}</div>
+                <div class="stat-label">Критичных</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{comments_by_severity.get('high', 0)}</div>
+                <div class="stat-label">Высокий приоритет</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{comments_by_severity.get('medium', 0)}</div>
+                <div class="stat-label">Средний приоритет</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Детальный отчёт</h2>
+        <pre>{report_content}</pre>
+    </div>
+
+    <div class="section">
+        <h2>Комментарии ({len(comments)})</h2>
+        {"" if comments else "<p style='color: #999; font-style: italic;'>Комментариев пока нет</p>"}
+        {('''
         <table>
-            <tr><th>File</th><th>Line</th><th>Type</th><th>Severity</th><th>Comment</th></tr>
-            {''.join(
-                f'<tr class="{c.get("severity", "medium")}"><td>{c.get("file", "unknown")}</td><td>{c.get("line_range", "-")}</td><td>{c.get("type", "comment")}</td><td>{c.get("severity", "medium")}</td><td>{c.get("text", "")}</td></tr>'
-                for c in session['comments']
-            )}
+            <tr>
+                <th style="width: 20%;">Файл</th>
+                <th style="width: 10%;">Строки</th>
+                <th style="width: 15%;">Тип</th>
+                <th style="width: 12%;">Приоритет</th>
+                <th style="width: 43%;">Комментарий</th>
+            </tr>
+            ''' + ''.join(
+                f'<tr class="{c.get("severity", "medium")}"><td>{c.get("file", "unknown")}</td><td>{c.get("line_range", "-")}</td><td>{c.get("type", "comment")}</td><td>{c.get("severity", "medium")}</td><td>{c.get("text", "").replace("<", "&lt;").replace(">", "&gt;")}</td></tr>'
+                for c in comments
+            ) + '''
         </table>
+        ''') if comments else ""}
     </div>
 
     <div class="section">
         <h2>Diff</h2>
-        <pre>{diff_content}</pre>
+        <pre>{diff_content[:5000] if len(diff_content) > 5000 else diff_content}{"..." if len(diff_content) > 5000 else ""}</pre>
+    </div>
+
+    <div style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #ddd; color: #999; font-size: 0.9em; text-align: center;">
+        <p>Сгенерировано: {time.strftime("%d.%m.%Y %H:%M:%S")}</p>
+        <p>Code Review Platform</p>
     </div>
 </body>
 </html>"""

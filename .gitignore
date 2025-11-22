@@ -41,3 +41,10 @@ gitea_data/
 gitea_config/
 gitea
 
+# PostgreSQL data
+postgres_data/
+
+# Collected MRs
+mrs_collected.json
+*.mrs.json
+

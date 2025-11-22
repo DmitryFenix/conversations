@@ -1,6 +1,7 @@
 // frontend/src/router.jsx
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import ReviewerDashboard from './ReviewerDashboard.jsx'
+import MRSelectionPage from './MRSelectionPage.jsx'
 import CandidateView from './CandidateView.jsx'
 import TimerWidget from './TimerWidget.jsx'
 import LegacyApp from './App.jsx'
@@ -11,6 +12,7 @@ export default function AppRouter() {
       <Routes>
         {/* Новые роуты с разделением ролей */}
         <Route path="/reviewer" element={<ReviewerDashboard />} />
+        <Route path="/reviewer/sessions/:sessionId/select-mr" element={<MRSelectionPage />} />
         <Route path="/reviewer/sessions/:sessionId" element={<ReviewerDashboard />} />
         <Route path="/candidate/:token" element={<CandidateView />} />
         <Route path="/timer/:token" element={<TimerWidget />} />

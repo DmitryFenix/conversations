@@ -1,0 +1,36 @@
+/* Кастомный скроллбар для WebKit браузеров (Chrome, Safari, Edge) */
+.mr-selector-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.mr-selector-scroll::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 4px;
+}
+
+.mr-selector-scroll::-webkit-scrollbar-thumb {
+  background: #cbd5e0;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.mr-selector-scroll::-webkit-scrollbar-thumb:hover {
+  background: #a0aec0;
+}
+
+/* Для темной темы */
+.dark .mr-selector-scroll::-webkit-scrollbar-thumb {
+  background: #555;
+}
+
+.dark .mr-selector-scroll::-webkit-scrollbar-thumb:hover {
+  background: #777;
+}
+
+/* Плавная прокрутка */
+.mr-selector-scroll {
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+
+

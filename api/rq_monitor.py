@@ -435,14 +435,34 @@ class OptimizedQueue:
         elif priority == "low":
             timeout = _builtins.max(timeout, 180)  # Минимум 3 минуты для низкого приоритета
         
+        # В RQ 2.6.0 retry передается как число напрямую
         # Создаём задачу с параметрами
+        # Примечание: в RQ 2.6.0 параметр retry может не поддерживаться напрямую
+        # Используем только поддерживаемые параметры
+        enqueue_kwargs = {
+            "job_timeout": timeout,
+            "result_ttl": 3600,  # Результат хранится 1 час
+            "failure_ttl": 86400,  # Ошибки хранятся 24 часа
+        }
+        
+        # Пробуем добавить retry если поддерживается
+        # В RQ 2.6.0 retry может быть числом или объектом Retry
+        try:
+            from rq.retry import Retry
+            enqueue_kwargs["retry"] = Retry(max=retry) if isinstance(retry, int) else retry
+        except ImportError:
+            # Если модуль не найден, пробуем передать как число
+            # В некоторых версиях RQ retry может быть просто числом
+            try:
+                enqueue_kwargs["retry"] = retry
+            except Exception:
+                # Если не поддерживается, просто не передаем
+                logger.warning(f"Retry parameter not supported in this RQ version, skipping")
+        
         job = self.queue.enqueue(
             "eval_worker.evaluate",
             session_id,
-            job_timeout=timeout,
-            retry=retry,
-            result_ttl=3600,  # Результат хранится 1 час
-            failure_ttl=86400,  # Ошибки хранятся 24 часа
+            **enqueue_kwargs
         )
         
         # Логируем
