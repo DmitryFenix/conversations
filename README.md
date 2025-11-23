@@ -2,30 +2,6 @@
 
 🚀 **Автоматизированная платформа для проведения технических интервью и code review**
 
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new)
-[![Deploy on Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com)
-
----
-
-## 🎯 Быстрый старт
-
-### 🚀 Развертывание в облаке (САМЫЙ ПРОСТОЙ СПОСОБ)
-
-**Railway.app — БЕСПЛАТНО, за 2 минуты, БЕЗ УСТАНОВКИ:**
-
-1. Зайдите на [railway.app](https://railway.app)
-2. Нажмите "New Project" → "Deploy from GitHub repo"
-3. Подключите ваш репозиторий
-4. Готово! Railway автоматически развернет приложение
-
-📖 **Подробная инструкция:** [DEPLOY_NOW.md](./DEPLOY_NOW.md)
-
-**Альтернатива (если уже установлен Railway CLI):**
-```bash
-railway login
-railway init
-railway up
-```
 
 ### Локальный запуск (Docker)
 
@@ -82,25 +58,9 @@ docker compose up -d
 - **Git-хостинг**: Gitea
 - **Контейнеризация**: Docker
 
----
-
-## 📞 Демо
-
-Хотите попробовать? Разверните за 5 минут:
-
-```bash
-docker compose up -d
-```
-
-Или используйте готовую демо-версию (см. [DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md))
-
----
-
-## 📄 Лицензия
-
-[Указать лицензию]
 
 ---
 
 *Сделано с ❤️ для упрощения процесса технических интервью*
+
 
