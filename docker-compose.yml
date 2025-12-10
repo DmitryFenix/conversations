@@ -12,7 +12,7 @@ services:
       # Hot reload: монтируем исходники для автоматической перезагрузки
       - ./api/main.py:/app/main.py
       - ./api/eval_worker.py:/app/eval_worker.py
-      - ./api/gitea_client.py:/app/gitea_client.py
+      - ./api/github_client.py:/app/github_client.py
       - ./api/mr_database.py:/app/mr_database.py
       - ./api/mr_classifier.py:/app/mr_classifier.py
       - ./api/migrations:/app/migrations
@@ -24,11 +24,11 @@ services:
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     environment:
       - PYTHONUNBUFFERED=1
-      # Gitea integration (Gitea в Docker контейнере)
-      # Внутри Docker сети используем имя сервиса и внутренний порт
-      - GITEA_URL=http://gitea:4000
-      - GITEA_WEB_URL=http://localhost:4001  # Для доступа из браузера
-      - GITEA_ADMIN_TOKEN=${GITEA_ADMIN_TOKEN:-}
+      # GitHub integration
+      # GITHUB_TOKEN - Personal Access Token (PAT) с правами repo
+      # GITHUB_ORGANIZATION - опционально, название организации (если репозитории создаются в организации)
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_ORGANIZATION=${GITHUB_ORGANIZATION:-}
       # PostgreSQL для Merge Requests
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
@@ -80,25 +80,6 @@ services:
       - PYTHONUNBUFFERED=1
     restart: always  # Автоматически перезапускать worker при падении
 
-  gitea:
-    image: gitea/gitea:1.22.2
-    container_name: gitea
-    environment:
-      - USER_UID=1000
-      - USER_GID=1000
-      - GITEA__database__DB_TYPE=sqlite3
-      - GITEA__database__PATH=/data/gitea/gitea.db
-      - GITEA__service__DISABLE_REGISTRATION=true
-      - GITEA__server__DOMAIN=localhost
-      - GITEA__server__HTTP_PORT=4000
-      - GITEA__server__ROOT_URL=http://localhost:4001
-    volumes:
-      - ./gitea_data:/data
-      - ./gitea_config:/etc/gitea
-    ports:
-      - "4001:4000"  # Внешний порт 4001, внутренний 4000
-      - "2222:22"
-    restart: always
 
   postgres:
     image: postgres:16-alpine

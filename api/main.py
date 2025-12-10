@@ -78,29 +78,26 @@ except Exception as e:
     logger.warning(f"MR database module not available: {e}", exc_info=True)
     # Продолжаем работу без MR функциональности
 
-# === GITEA ===
-from gitea_client import GiteaClient
+# === GITHUB ===
+from github_client import GitHubClient
 
-# Конфигурация Gitea (можно сделать через переменные окружения)
-# GITEA_URL по умолчанию для доступа к Gitea в Docker контейнере
-# Внутри Docker сети используем имя сервиса: http://gitea:4000
-# Если Gitea на хосте - используйте http://host.docker.internal:4000
-GITEA_URL = os.getenv("GITEA_URL", "http://gitea:4000")
-# GITEA_WEB_URL для доступа из браузера (внешний порт)
-GITEA_WEB_URL = os.getenv("GITEA_WEB_URL", "http://localhost:4001")
-GITEA_ADMIN_TOKEN = os.getenv("GITEA_ADMIN_TOKEN", "")  # Будет установлен при первой настройке
+# Конфигурация GitHub
+# GITHUB_TOKEN - Personal Access Token (PAT) с правами repo
+# GITHUB_ORGANIZATION - опционально, название организации (если репозитории создаются в организации)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_ORGANIZATION = os.getenv("GITHUB_ORGANIZATION", "")
 
-# Инициализация Gitea клиента (опционально, только если токен установлен)
-gitea_client = None
-if GITEA_ADMIN_TOKEN:
+# Инициализация GitHub клиента (опционально, только если токен установлен)
+github_client = None
+if GITHUB_TOKEN:
     try:
-        gitea_client = GiteaClient(GITEA_URL, GITEA_ADMIN_TOKEN)
-        logger.info(f"Gitea client initialized: {GITEA_URL}")
+        github_client = GitHubClient(GITHUB_TOKEN, organization=GITHUB_ORGANIZATION if GITHUB_ORGANIZATION else None)
+        logger.info(f"GitHub client initialized for user: {github_client.username}")
     except Exception as e:
-        logger.warning(f"Failed to initialize Gitea client: {e}")
-        gitea_client = None
+        logger.warning(f"Failed to initialize GitHub client: {e}")
+        github_client = None
 else:
-    logger.info("Gitea client not initialized (no admin token)")
+    logger.info("GitHub client not initialized (no token)")
 
 
 def init_db():
@@ -198,7 +195,7 @@ def init_db():
         c.execute("ALTER TABLE sessions ADD COLUMN status TEXT DEFAULT 'active'")
         print("Added column: status")
     
-    # === Поля для Gitea интеграции ===
+    # === Поля для GitHub интеграции (используем gitea_* для обратной совместимости) ===
     if 'gitea_user' not in columns:
         c.execute("ALTER TABLE sessions ADD COLUMN gitea_user TEXT")
         print("Added column: gitea_user")
@@ -581,7 +578,7 @@ def reviewer_create_session(payload: ReviewerSessionCreate):
     access_token = generate_access_token()  # Для кандидата
     reviewer_token = generate_reviewer_token()  # Для проверяющего
 
-    # Генерируем имена для Gitea (транслитерация кириллицы)
+    # Генерируем имена для GitHub (транслитерация кириллицы)
     def transliterate(text):
         """Простая транслитерация кириллицы в латиницу"""
         trans_dict = {
@@ -601,7 +598,7 @@ def reviewer_create_session(payload: ReviewerSessionCreate):
             result += trans_dict.get(char, char if char.isalnum() or char in ['_', '-'] else '_')
         return result
     
-    # Нормализация имени кандидата для Gitea username
+    # Нормализация имени кандидата для идентификации
     candidate_id_safe = transliterate(payload.candidate_name).lower()
     # Заменяем все недопустимые символы на подчёркивания
     candidate_id_safe = ''.join(c if c.isalnum() or c in ['_', '-'] else '_' for c in candidate_id_safe)
@@ -614,7 +611,12 @@ def reviewer_create_session(payload: ReviewerSessionCreate):
     if not candidate_id_safe or len(candidate_id_safe) < 2:
         candidate_id_safe = f"candidate_{abs(hash(payload.candidate_name)) % 10000}"
     
-    gitea_user = f"candidate_{candidate_id_safe}"
+    # Для GitHub используем текущего пользователя или организацию
+    github_owner = github_client.username if github_client else None
+    if GITHUB_ORGANIZATION:
+        github_owner = GITHUB_ORGANIZATION
+    
+    gitea_user = github_owner  # Используем существующее поле для обратной совместимости
     gitea_repo = None
     gitea_pr_id = None
     gitea_enabled = 0
@@ -633,7 +635,7 @@ def reviewer_create_session(payload: ReviewerSessionCreate):
     
     c.execute(
         "INSERT INTO sessions (candidate_name, mr_package, comments, created_at, expires_at, access_token, reviewer_token, reviewer_name, status, candidate_id, gitea_user, gitea_enabled, mr_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (payload.candidate_name, payload.mr_package, json.dumps([]), now.isoformat() + 'Z', expires_at.isoformat() + 'Z', access_token, reviewer_token, payload.reviewer_name, 'active', candidate_id_safe, gitea_user if gitea_client else None, 0, first_mr_id)
+        (payload.candidate_name, payload.mr_package, json.dumps([]), now.isoformat() + 'Z', expires_at.isoformat() + 'Z', access_token, reviewer_token, payload.reviewer_name, 'active', candidate_id_safe, gitea_user if github_client else None, 0, first_mr_id)
     )
     session_id = c.lastrowid
     conn.commit()
@@ -672,50 +674,33 @@ def reviewer_create_session(payload: ReviewerSessionCreate):
         except Exception as e:
             logger.warning(f"Failed to load diff from MR(s): {e}", exc_info=True)
     
-    # Интеграция с Gitea (если клиент инициализирован)
-    gitea_clone_url = None
-    if gitea_client:
+    # Интеграция с GitHub (если клиент инициализирован)
+    github_clone_url = None
+    if github_client and github_owner:
         try:
-            update_progress(session_id, 25, "Создание пользователя Gitea...")
-            # 1. Создаём пользователя для кандидата (или используем существующего)
-            candidate_email = f"{gitea_user}@code-review.local"
-            user_result = gitea_client.create_user(
-                username=gitea_user,
-                email=candidate_email
-            )
-            
-            # Пользователь создан или уже существует - продолжаем в любом случае
-            if user_result:
-                logger.info(f"Created Gitea user: {gitea_user}")
-            else:
-                # Проверяем, может пользователь уже существует (это нормально)
-                # Это не ошибка - просто продолжаем использовать существующего пользователя
-                logger.info(f"Gitea user may already exist: {gitea_user}, continuing...")
-            
-            # Продолжаем создание репозитория даже если пользователь уже существует
-            
-            update_progress(session_id, 40, "Создание репозитория Gitea...")
-            # Теперь создаём репозиторий с session_id
-            gitea_repo = f"session_{session_id}"
-            repo_result = gitea_client.create_repository(
-                owner=gitea_user,
+            update_progress(session_id, 25, "Создание репозитория GitHub...")
+            # В GitHub репозитории создаются от имени текущего пользователя/организации
+            # Создаём уникальный репозиторий для сессии
+            gitea_repo = f"code-review-session-{session_id}"
+            repo_result = github_client.create_repository(
+                owner=github_owner,
                 repo_name=gitea_repo,
                 description=f"Code review session for {payload.candidate_name}",
                 private=True
             )
             
             if repo_result:
-                logger.info(f"Created Gitea repository: {gitea_user}/{gitea_repo}")
+                logger.info(f"Created GitHub repository: {github_owner}/{gitea_repo}")
                 update_progress(session_id, 55, "Репозиторий создан, создание ветки...")
                 
                 # Минимальная задержка для инициализации репозитория
                 import time
-                time.sleep(0.3)  # Уменьшили до 0.3 секунды
+                time.sleep(1)  # GitHub может требовать больше времени для инициализации
                 
                 # 3. Создаём ветку для кандидата сразу
                 candidate_branch = f"candidate-work-{session_id}"
-                branch_result = gitea_client.create_branch(
-                    owner=gitea_user,
+                branch_result = github_client.create_branch(
+                    owner=github_owner,
                     repo=gitea_repo,
                     branch_name=candidate_branch,
                     from_branch="main"
@@ -737,9 +722,9 @@ def greet():
 """
                 # Пытаемся создать файл с быстрыми повторными попытками
                 file_result = None
-                for attempt in range(2):  # Уменьшили до 2 попыток
-                    file_result = gitea_client.create_file(
-                        owner=gitea_user,
+                for attempt in range(3):  # GitHub может требовать больше попыток
+                    file_result = github_client.create_file(
+                        owner=github_owner,
                         repo=gitea_repo,
                         file_path="main.py",
                         content=starting_code,
@@ -749,16 +734,16 @@ def greet():
                     )
                     if file_result:
                         break
-                    if attempt < 1:
-                        time.sleep(0.5)  # Быстрая задержка: 0.5 сек вместо 2, 4
-                        logger.info(f"Retrying file creation (attempt {attempt + 2}/2)...")
+                    if attempt < 2:
+                        time.sleep(1)  # Задержка для GitHub
+                        logger.info(f"Retrying file creation (attempt {attempt + 2}/3)...")
                 
                 if file_result:
                     gitea_enabled = 1
-                    gitea_clone_url = gitea_client.get_repository_clone_url(gitea_user, gitea_repo)
+                    github_clone_url = github_client.get_repository_clone_url(github_owner, gitea_repo)
                     logger.info(f"Initialized starting code in repository (branch: {candidate_branch})")
                     
-                    # Обновляем сессию с данными Gitea
+                    # Обновляем сессию с данными GitHub (используем gitea_* поля для обратной совместимости)
                     c.execute(
                         "UPDATE sessions SET gitea_repo = ?, gitea_enabled = ? WHERE id = ?",
                         (gitea_repo, gitea_enabled, session_id)
@@ -769,15 +754,15 @@ def greet():
                     # Автоматически создаём PR (файл уже в нужной ветке)
                     try:
                         logger.info(f"Creating PR for session {session_id}")
-                        # Минимальная задержка для синхронизации Gitea
-                        time.sleep(0.3)
+                        # Минимальная задержка для синхронизации GitHub
+                        time.sleep(1)
                         
                         # Создаём PR из ветки кандидата в main
                         pr_title = f"Code Review Session #{session_id} - {payload.candidate_name}"
                         pr_body = f"Code review session for candidate: {payload.candidate_name}\n\nSession ID: {session_id}\n\nThis PR contains the candidate's work for review."
                         
-                        pr_result = gitea_client.create_pull_request(
-                            owner=gitea_user,
+                        pr_result = github_client.create_pull_request(
+                            owner=github_owner,
                             repo=gitea_repo,
                             title=pr_title,
                             body=pr_body,
@@ -799,22 +784,22 @@ def greet():
                     logger.warning(f"Failed to create initial file in repository, but repository exists")
                     # Репозиторий создан, но файл не создан - всё равно включаем интеграцию
                     gitea_enabled = 1
-                    gitea_clone_url = gitea_client.get_repository_clone_url(gitea_user, gitea_repo)
+                    github_clone_url = github_client.get_repository_clone_url(github_owner, gitea_repo)
                     
-                    # Обновляем сессию с данными Gitea
+                    # Обновляем сессию с данными GitHub
                     c.execute(
                         "UPDATE sessions SET gitea_repo = ?, gitea_enabled = ? WHERE id = ?",
                         (gitea_repo, gitea_enabled, session_id)
                     )
                     conn.commit()
             else:
-                logger.warning(f"Failed to create Gitea repository for user: {gitea_user}")
-                # Репозиторий не создан - сессия уже создана без Gitea
+                logger.warning(f"Failed to create GitHub repository for owner: {github_owner}")
+                # Репозиторий не создан - сессия уже создана без GitHub
         except Exception as e:
-            logger.error(f"Error during Gitea integration: {e}", exc_info=True)
-            # Если произошла ошибка, сессия уже создана без Gitea (gitea_enabled=0)
+            logger.error(f"Error during GitHub integration: {e}", exc_info=True)
+            # Если произошла ошибка, сессия уже создана без GitHub (gitea_enabled=0)
     
-    # Сессия уже создана выше (с gitea_enabled=0 по умолчанию, или обновлена если Gitea успешно настроен)
+    # Сессия уже создана выше (с gitea_enabled=0 по умолчанию, или обновлена если GitHub успешно настроен)
 
     conn.close()
 
@@ -856,14 +841,16 @@ index abc123..def456 100644
         "reviewer_url": f"/reviewer/sessions/{session_id}"
     }
     
-    # Добавляем информацию о Gitea если она доступна
-    if gitea_enabled and gitea_clone_url:
-        response["gitea"] = {
+    # Добавляем информацию о GitHub если она доступна
+    if gitea_enabled and github_clone_url:
+        github_web_url = github_client.get_repository_web_url(github_owner, gitea_repo) if github_client else None
+        response["gitea"] = {  # Используем gitea ключ для обратной совместимости с frontend
             "enabled": True,
-            "user": gitea_user,
+            "user": github_owner,
             "repo": gitea_repo,
-            "clone_url": gitea_clone_url,
-            "web_url": f"{GITEA_WEB_URL}/{gitea_user}/{gitea_repo}"
+            "clone_url": github_clone_url,
+            "web_url": github_web_url or f"https://github.com/{github_owner}/{gitea_repo}",
+            "pr_url": f"{github_web_url}/pull/{gitea_pr_id}" if gitea_pr_id and github_web_url else None
         }
     
     # Удаляем прогресс через 5 секунд после завершения
@@ -1047,7 +1034,7 @@ try:
         """Обновить выбранные MR для сессии"""
         mr_ids = payload.get('mr_ids', [])
         
-        # Получаем информацию о сессии (включая Gitea данные)
+        # Получаем информацию о сессии (включая GitHub данные)
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("SELECT gitea_user, gitea_repo, gitea_enabled FROM sessions WHERE id = ?", (session_id,))
@@ -1098,7 +1085,7 @@ try:
                         total_points += mr.get('complexity_points', 3)
                         mr_titles.append(mr_title)
                         
-                        # Парсим diff для обновления файлов в Gitea
+                        # Парсим diff для обновления файлов в GitHub
                         diff_content = mr['diff_content']
                         parsed_files = parse_diff_simple(diff_content)
                         logger.info(f"MR #{mr_id_item} ({mr_title}): extracted {len(parsed_files)} file(s): {list(parsed_files.keys())}")
@@ -1117,10 +1104,10 @@ try:
                 with open(diff_path, 'w', encoding='utf-8') as f:
                     f.write('\n'.join(combined_diff))
                 logger.info(f"Updated diff from {len(mr_ids)} MR(s) (total {total_points} points) for session {session_id}")
-                logger.info(f"Total unique files to update in Gitea: {len(files_to_update)} - {list(files_to_update.keys())}")
+                logger.info(f"Total unique files to update in GitHub: {len(files_to_update)} - {list(files_to_update.keys())}")
             
-            # Обновляем файлы в Gitea, если включена
-            if gitea_enabled and gitea_user and gitea_repo and gitea_client and files_to_update:
+            # Обновляем файлы в GitHub, если включена
+            if gitea_enabled and gitea_user and gitea_repo and github_client and files_to_update:
                 candidate_branch = f"candidate-work-{session_id}"
                 
                 # Фильтруем файлы, которые не должны обновляться в Gitea
@@ -1131,16 +1118,16 @@ try:
                     if path not in files_to_skip
                 }
                 
-                logger.info(f"Updating {len(filtered_files)} file(s) in Gitea PR for session {session_id} (skipped {len(files_to_update) - len(filtered_files)} file(s))")
+                logger.info(f"Updating {len(filtered_files)} file(s) in GitHub PR for session {session_id} (skipped {len(files_to_update) - len(filtered_files)} file(s))")
                 
                 for file_path, file_content in filtered_files.items():
                     try:
                         # Проверяем, существует ли файл в репозитории
-                        file_info = gitea_client.get_file_info(gitea_user, gitea_repo, file_path, branch=candidate_branch)
+                        file_info = github_client.get_file_info(gitea_user, gitea_repo, file_path, branch=candidate_branch)
                         
                         if file_info and file_info.get("sha"):
                             # Файл существует - обновляем
-                            result = gitea_client.update_file(
+                            result = github_client.update_file(
                                 owner=gitea_user,
                                 repo=gitea_repo,
                                 file_path=file_path,
@@ -1150,12 +1137,12 @@ try:
                                 sha=file_info["sha"]
                             )
                             if result:
-                                logger.info(f"Updated file {file_path} in Gitea for session {session_id}")
+                                logger.info(f"Updated file {file_path} in GitHub for session {session_id}")
                             else:
-                                logger.warning(f"Failed to update file {file_path} in Gitea for session {session_id}")
+                                logger.warning(f"Failed to update file {file_path} in GitHub for session {session_id}")
                         else:
                             # Файл не существует - создаём
-                            result = gitea_client.create_file(
+                            result = github_client.create_file(
                                 owner=gitea_user,
                                 repo=gitea_repo,
                                 file_path=file_path,
@@ -1536,13 +1523,13 @@ def reviewer_evaluate_session(session_id: int):
     
     gitea_user, gitea_repo, gitea_pr_id = row
     
-    # Если есть PR, синхронизируем комментарии из Gitea перед оценкой
-    if gitea_client and gitea_pr_id:
+    # Если есть PR, синхронизируем комментарии из GitHub перед оценкой
+    if github_client and gitea_pr_id:
         try:
-            logger.info(f"Auto-syncing comments from Gitea PR before evaluation for session {session_id}")
+            logger.info(f"Auto-syncing comments from GitHub PR before evaluation for session {session_id}")
             reviewer_sync_comments_from_gitea(session_id)
         except Exception as e:
-            logger.warning(f"Failed to sync comments from Gitea before evaluation: {e}")
+            logger.warning(f"Failed to sync comments from GitHub before evaluation: {e}")
             # Не прерываем оценку, если синхронизация не удалась
     
     # Используем оптимизированную очередь с мониторингом
@@ -1829,14 +1816,14 @@ def reviewer_extend_session(session_id: int):
         "expires_at": expires_at_str
     }
 
-# === API: Reviewer - Создать Pull Request в Gitea ===
+# === API: Reviewer - Создать Pull Request в GitHub ===
 @app.post("/api/reviewer/sessions/{session_id}/gitea/create-pr")
 def reviewer_create_gitea_pr(session_id: int, payload: dict = None):
     """
-    Создать Pull Request в Gitea для сессии
+    Создать Pull Request в GitHub для сессии
     """
-    if not gitea_client:
-        raise HTTPException(status_code=503, detail="Gitea integration not available")
+    if not github_client:
+        raise HTTPException(status_code=503, detail="GitHub integration not available")
     
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -1855,7 +1842,7 @@ def reviewer_create_gitea_pr(session_id: int, payload: dict = None):
     # Создаём PR - для этого нужна ветка с изменениями
     # 1. Создаём новую ветку для изменений кандидата
     candidate_branch = f"candidate-work-{session_id}"
-    branch_result = gitea_client.create_branch(
+    branch_result = github_client.create_branch(
         owner=gitea_user,
         repo=gitea_repo,
         branch_name=candidate_branch,
@@ -1863,15 +1850,15 @@ def reviewer_create_gitea_pr(session_id: int, payload: dict = None):
     )
     
     if not branch_result:
-        raise HTTPException(status_code=500, detail="Failed to create candidate branch in Gitea")
+        raise HTTPException(status_code=500, detail="Failed to create candidate branch in GitHub")
     
     # 2. Обновляем файл в новой ветке, добавляя комментарий о code review
     import time
-    time.sleep(0.3)  # Минимальная задержка для синхронизации Gitea
+    time.sleep(1)  # Задержка для синхронизации GitHub
     
     # Обновляем файл в новой ветке, добавляя комментарий о code review
     # update_file сам получит SHA файла из новой ветки
-    update_result = gitea_client.update_file(
+    update_result = github_client.update_file(
         owner=gitea_user,
         repo=gitea_repo,
         file_path="main.py",
@@ -1894,7 +1881,7 @@ def greet():
     pr_title = f"Code Review Session #{session_id} - {candidate_name}"
     pr_body = f"Code review session for candidate: {candidate_name}\n\nSession ID: {session_id}\n\nThis PR contains the candidate's work for review."
     
-    pr_result = gitea_client.create_pull_request(
+    pr_result = github_client.create_pull_request(
         owner=gitea_user,
         repo=gitea_repo,
         title=pr_title,
@@ -1904,7 +1891,7 @@ def greet():
     )
     
     if not pr_result:
-        raise HTTPException(status_code=500, detail="Failed to create PR in Gitea")
+        raise HTTPException(status_code=500, detail="Failed to create PR in GitHub")
     
     pr_id = pr_result.get("number")
     
@@ -1915,21 +1902,23 @@ def greet():
     conn.commit()
     conn.close()
     
+    github_web_url = github_client.get_repository_web_url(gitea_user, gitea_repo)
+    
     return {
         "status": "ok",
         "pr_id": pr_id,
-        "pr_url": f"{GITEA_WEB_URL}/{gitea_user}/{gitea_repo}/pulls/{pr_id}",
+        "pr_url": f"{github_web_url}/pull/{pr_id}",
         "pr_data": pr_result
     }
 
-# === API: Reviewer - Получить Pull Request из Gitea ===
+# === API: Reviewer - Получить Pull Request из GitHub ===
 @app.get("/api/reviewer/sessions/{session_id}/gitea/pr")
 def reviewer_get_gitea_pr(session_id: int):
     """
-    Получить информацию о Pull Request из Gitea
+    Получить информацию о Pull Request из GitHub
     """
-    if not gitea_client:
-        raise HTTPException(status_code=503, detail="Gitea integration not available")
+    if not github_client:
+        raise HTTPException(status_code=503, detail="GitHub integration not available")
     
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -1946,15 +1935,15 @@ def reviewer_get_gitea_pr(session_id: int):
         conn.close()
         raise HTTPException(status_code=404, detail="PR not created for this session")
     
-    pr_data = gitea_client.get_pull_request(gitea_user, gitea_repo, gitea_pr_id)
+    pr_data = github_client.get_pull_request(gitea_user, gitea_repo, gitea_pr_id)
     
     if not pr_data:
         conn.close()
-        raise HTTPException(status_code=404, detail="PR not found in Gitea")
+        raise HTTPException(status_code=404, detail="PR not found in GitHub")
     
     # Получаем комментарии к PR
-    pr_comments = gitea_client.get_pull_request_comments(gitea_user, gitea_repo, gitea_pr_id)
-    issue_comments = gitea_client.get_pull_request_issue_comments(gitea_user, gitea_repo, gitea_pr_id)
+    pr_comments = github_client.get_pull_request_comments(gitea_user, gitea_repo, gitea_pr_id)
+    issue_comments = github_client.get_pull_request_issue_comments(gitea_user, gitea_repo, gitea_pr_id)
     all_comments = pr_comments + issue_comments
     
     # Проверяем, есть ли сигнал готовности в комментариях (автоматически обновляем статус)
@@ -1973,12 +1962,13 @@ def reviewer_get_gitea_pr(session_id: int):
                 ready_at = created_at if created_at else datetime.utcnow().isoformat() + 'Z'
                 c.execute("UPDATE sessions SET candidate_ready_at = ? WHERE id = ?", (ready_at, session_id))
                 conn.commit()
-                logger.info(f"Auto-detected candidate readiness from Gitea PR comment for session {session_id}")
+                logger.info(f"Auto-detected candidate readiness from GitHub PR comment for session {session_id}")
             break
     
     # Получаем diff
-    pr_diff = gitea_client.get_pull_request_diff(gitea_user, gitea_repo, gitea_pr_id)
+    pr_diff = github_client.get_pull_request_diff(gitea_user, gitea_repo, gitea_pr_id)
     
+    github_web_url = github_client.get_repository_web_url(gitea_user, gitea_repo)
     conn.close()
     
     return {
@@ -1986,17 +1976,17 @@ def reviewer_get_gitea_pr(session_id: int):
         "comments": pr_comments,
         "issue_comments": issue_comments,
         "diff": pr_diff,
-        "pr_url": f"{GITEA_WEB_URL}/{gitea_user}/{gitea_repo}/pulls/{gitea_pr_id}"
+        "pr_url": f"{github_web_url}/pull/{gitea_pr_id}"
     }
 
-# === API: Reviewer - Синхронизировать комментарии ИЗ Gitea PR в нашу систему ===
+# === API: Reviewer - Синхронизировать комментарии ИЗ GitHub PR в нашу систему ===
 @app.post("/api/reviewer/sessions/{session_id}/gitea/sync-comments-from-gitea")
 def reviewer_sync_comments_from_gitea(session_id: int):
     """
-    Синхронизировать комментарии ИЗ Gitea PR в нашу систему (для отчёта)
+    Синхронизировать комментарии ИЗ GitHub PR в нашу систему (для отчёта)
     """
-    if not gitea_client:
-        raise HTTPException(status_code=503, detail="Gitea integration not available")
+    if not github_client:
+        raise HTTPException(status_code=503, detail="GitHub integration not available")
     
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -2014,12 +2004,12 @@ def reviewer_sync_comments_from_gitea(session_id: int):
         conn.close()
         raise HTTPException(status_code=400, detail="PR not created for this session")
     
-    # Получаем комментарии из Gitea PR (и review comments, и issue comments)
-    logger.info(f"Syncing comments from Gitea PR {gitea_user}/{gitea_repo}#{gitea_pr_id} for session {session_id}")
-    pr_comments = gitea_client.get_pull_request_comments(gitea_user, gitea_repo, gitea_pr_id)
-    issue_comments = gitea_client.get_pull_request_issue_comments(gitea_user, gitea_repo, gitea_pr_id)
+    # Получаем комментарии из GitHub PR (и review comments, и issue comments)
+    logger.info(f"Syncing comments from GitHub PR {gitea_user}/{gitea_repo}#{gitea_pr_id} for session {session_id}")
+    pr_comments = github_client.get_pull_request_comments(gitea_user, gitea_repo, gitea_pr_id)
+    issue_comments = github_client.get_pull_request_issue_comments(gitea_user, gitea_repo, gitea_pr_id)
     
-    logger.info(f"Retrieved {len(pr_comments)} review comments and {len(issue_comments)} issue comments from Gitea PR")
+    logger.info(f"Retrieved {len(pr_comments)} review comments and {len(issue_comments)} issue comments from GitHub PR")
     
     # Объединяем все комментарии
     all_pr_comments = pr_comments + issue_comments
@@ -2054,7 +2044,7 @@ def reviewer_sync_comments_from_gitea(session_id: int):
             ready_at = ready_comment_time if ready_comment_time else datetime.utcnow().isoformat() + 'Z'
             c.execute("UPDATE sessions SET candidate_ready_at = ? WHERE id = ?", (ready_at, session_id))
             conn.commit()
-            logger.info(f"Auto-detected candidate readiness from Gitea PR comment for session {session_id}")
+            logger.info(f"Auto-detected candidate readiness from GitHub PR comment for session {session_id}")
     
     if not all_pr_comments:
         conn.close()
@@ -2062,7 +2052,7 @@ def reviewer_sync_comments_from_gitea(session_id: int):
             "status": "ok",
             "synced_count": 0,
             "total_count": len(existing_comments),
-            "message": "No comments found in Gitea PR",
+            "message": "No comments found in GitHub PR",
             "candidate_ready_detected": candidate_ready_detected
         }
     
@@ -2081,8 +2071,8 @@ def reviewer_sync_comments_from_gitea(session_id: int):
         if gitea_comment_id and gitea_comment_id in existing_comment_ids:
             continue
         
-        # Парсим комментарий из Gitea
-        # Формат Gitea: body может содержать [TYPE] SEVERITY\n\nтекст
+        # Парсим комментарий из GitHub
+        # Формат GitHub: body может содержать [TYPE] SEVERITY\n\nтекст
         body = pr_comment.get("body", "")
         comment_type = "bug"
         severity = "medium"
@@ -2104,7 +2094,7 @@ def reviewer_sync_comments_from_gitea(session_id: int):
             severity = severity_map.get(severity_part, "medium")
         
         # Извлекаем информацию о файле и строке
-        # В Gitea комментарии могут иметь разные поля: path, original_path, diff_hunk, line, original_line
+        # В GitHub комментарии могут иметь разные поля: path, original_path, diff_hunk, line, original_line
         path = pr_comment.get("path") or pr_comment.get("original_path") or "main.py"
         line = pr_comment.get("line") or pr_comment.get("original_line") or pr_comment.get("new_line") or 1
         line_range = f"{line}-{line}"
@@ -2118,8 +2108,8 @@ def reviewer_sync_comments_from_gitea(session_id: int):
             "type": comment_type,
             "severity": severity,
             "text": text,
-            "gitea_id": gitea_comment_id,  # Сохраняем ID для избежания дубликатов
-            "source": "gitea"  # Помечаем, что комментарий из Gitea
+            "gitea_id": gitea_comment_id,  # Сохраняем ID для избежания дубликатов (используем старое имя для совместимости)
+            "source": "github"  # Помечаем, что комментарий из GitHub
         }
         
         existing_comments.append(new_comment)
@@ -2137,18 +2127,18 @@ def reviewer_sync_comments_from_gitea(session_id: int):
         "status": "ok",
         "synced_count": synced_count,
         "total_count": len(existing_comments),
-        "message": f"Synced {synced_count} comments from Gitea",
+        "message": f"Synced {synced_count} comments from GitHub",
         "candidate_ready_detected": candidate_ready_detected
     }
 
-# === API: Reviewer - Синхронизировать комментарии в Gitea PR ===
+# === API: Reviewer - Синхронизировать комментарии в GitHub PR ===
 @app.post("/api/reviewer/sessions/{session_id}/gitea/sync-comments")
 def reviewer_sync_gitea_comments(session_id: int):
     """
-    Синхронизировать комментарии из нашей системы в Gitea PR
+    Синхронизировать комментарии из нашей системы в GitHub PR
     """
-    if not gitea_client:
-        raise HTTPException(status_code=503, detail="Gitea integration not available")
+    if not github_client:
+        raise HTTPException(status_code=503, detail="GitHub integration not available")
     
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -2170,8 +2160,8 @@ def reviewer_sync_gitea_comments(session_id: int):
     errors = []
     
     for comment in comments:
-        # Пропускаем комментарии, которые уже из Gitea (чтобы не дублировать)
-        if comment.get("source") == "gitea" or comment.get("gitea_id"):
+        # Пропускаем комментарии, которые уже из GitHub (чтобы не дублировать)
+        if comment.get("source") == "github" or comment.get("gitea_id"):
             continue
             
         try:
@@ -2184,10 +2174,10 @@ def reviewer_sync_gitea_comments(session_id: int):
                 except:
                     line = 1
             
-            # Создаём комментарий в Gitea PR
+            # Создаём комментарий в GitHub PR
             comment_body = f"[{comment.get('type', 'comment').upper()}] {comment.get('severity', 'medium').upper()}\n\n{comment.get('text', '')}"
             
-            result = gitea_client.create_pull_request_comment(
+            result = github_client.create_pull_request_comment(
                 owner=gitea_user,
                 repo=gitea_repo,
                 pr_index=gitea_pr_id,

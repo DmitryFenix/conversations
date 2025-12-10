@@ -210,7 +210,7 @@ export default function ReviewerDashboard() {
         loadSession(sessionId)
       }
     } catch (err) {
-      console.error('Ошибка синхронизации из Gitea:', err)
+      console.error('Ошибка синхронизации из GitHub:', err)
     } finally {
       setIsLoadingPR(false)
     }
@@ -834,7 +834,7 @@ export default function ReviewerDashboard() {
             <div style={{ marginTop: '30px', padding: '20px', background: '#f0f7ff', borderRadius: '8px', border: '1px solid #3498db' }}>
               <h3 style={{ marginTop: 0, marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <GitBranch size={20} />
-                Gitea Integration
+                GitHub Integration
               </h3>
               <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', gap: '10px', marginBottom: '15px' }}>
                 <div><strong>Пользователь:</strong></div>
@@ -909,20 +909,20 @@ export default function ReviewerDashboard() {
                     onClick={() => syncCommentsFromGitea(selectedSession.id)}
                     disabled={isLoadingPR}
                     style={{ fontSize: '12px', padding: '6px 12px' }}
-                    title="Синхронизировать комментарии из Gitea PR в нашу систему (для отчёта)"
+                    title="Синхронизировать комментарии из GitHub PR в нашу систему (для отчёта)"
                   >
                     <RefreshCw size={14} />
-                    Загрузить комментарии из Gitea
+                    Загрузить комментарии из GitHub
                   </button>
                   <button
                     className="btn btn-secondary"
                     onClick={() => syncGiteaComments(selectedSession.id)}
                     disabled={isLoadingPR}
                     style={{ fontSize: '12px', padding: '6px 12px' }}
-                    title="Отправить комментарии из нашей системы в Gitea PR"
+                    title="Отправить комментарии из нашей системы в GitHub PR"
                   >
                     <GitMerge size={14} />
-                    Отправить в Gitea
+                    Отправить в GitHub
                   </button>
                 </div>
               )}
@@ -1779,7 +1779,7 @@ export default function ReviewerDashboard() {
                             fontWeight: '500'
                           }}>
                             <GitBranch size={12} />
-                            Gitea
+                            GitHub
                           </span>
                         )}
                         {session.gitea?.pr_id && (

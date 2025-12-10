@@ -482,7 +482,7 @@ export default function CandidateView() {
             }}>
               Ваш Pull Request автоматически открыт в новой вкладке. Таймер с оставшимся временем сессии открыт в отдельном окне.
               <br /><br />
-              <strong>Работайте в Gitea, а таймер будет виден в отдельном окне.</strong>
+              <strong>Работайте в GitHub, а таймер будет виден в отдельном окне.</strong>
             </p>
             
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', alignItems: 'center' }}>
@@ -514,7 +514,7 @@ export default function CandidateView() {
                 }}
               >
                 <GitBranch size={20} />
-                <span>Открыть Gitea снова</span>
+                <span>Открыть GitHub снова</span>
                 <ExternalLink size={18} />
               </a>
               
@@ -572,7 +572,7 @@ export default function CandidateView() {
             maxWidth: '500px',
             textAlign: 'center'
           }}>
-            <strong>✅ Готово!</strong> Gitea и таймер открыты автоматически. 
+            <strong>✅ Готово!</strong> GitHub и таймер открыты автоматически. 
             Если окна закрылись, используйте кнопки выше для повторного открытия.
           </div>
         </div>
@@ -588,7 +588,7 @@ export default function CandidateView() {
           <GitBranch size={48} style={{ color: '#3498db', marginBottom: '20px' }} />
           <h2 style={{ marginBottom: '16px' }}>Code Review Session</h2>
           <p style={{ color: '#666', marginBottom: '24px', lineHeight: '1.6' }}>
-            Ваша сессия настроена для работы через Gitea. Репозиторий уже создан и готов к работе.
+            Ваша сессия настроена для работы через GitHub. Репозиторий уже создан и готов к работе.
             {session.gitea.web_url ? (
               <>
                 <br /><br />
@@ -624,7 +624,7 @@ export default function CandidateView() {
               onMouseLeave={(e) => e.currentTarget.style.background = '#3498db'}
             >
               <GitBranch size={18} />
-              <span>Открыть репозиторий в Gitea</span>
+              <span>Открыть репозиторий в GitHub</span>
               <ExternalLink size={16} />
             </a>
           )}
